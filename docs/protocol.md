@@ -170,6 +170,27 @@ SDK 类型定义说 `title` 是"bridge 渲染好的完整提示句（如 Claude 
 
 另外 `onPageShow` 只对 `@Entry` 组件生效，普通子组件里写了不会触发，是死代码。
 
+### 几个会静默撞车的命名
+
+组件成员名和 ArkUI 通用属性重名时，报错信息很难联想到根因：
+
+| 不能用作成员名 | 报错 |
+|---|---|
+| `tabIndex` | `Property 'tabIndex' ... is not assignable to base type 'CustomComponent'` |
+| `overlay` | 同上 |
+
+顶层类名也会和内置标识符冲突。`class Sheet` 会让 `Sheet.XXX` 解析失败，报 `'(' expected` —— 看起来像语法错误，实际是名字被 ArkUI 的 `bindSheet` / `SheetSize` 一族占了。遇到位置诡异的 `'(' expected`，先怀疑命名。
+
+### @Builder 不能接收产生 UI 的闭包
+
+```ts
+// ✗ 编译期报 '(' expected
+@Builder shell(content: () => void) { Column() { content() } }
+this.shell(() => { this.something() })
+```
+
+要传 UI 只能用 `@BuilderParam`。分支不多时，直接在外壳里按状态内联更省事。普通数据参数和非 UI 回调则不受限制。
+
 ## 会话与项目的识别
 
 ### 项目路径不能从目录名反解
