@@ -58,11 +58,11 @@ npm start
 
 ### 鸿蒙 App
 
-用 DevEco Studio 打开项目根目录直接运行。命令行构建：
+用 DevEco Studio 打开项目根目录，**先配好自动签名**（File → Project Structure → Signing Configs → 勾选 Automatically generate signature），再点 Run 装到手机。
 
-```bash
-hvigorw assembleHap --mode module -p product=default
-```
+鸿蒙不装未签名应用，签名必须用你自己的华为开发者账号。详见 [`docs/build-and-sign.md`](docs/build-and-sign.md)。
+
+> Release 页的 `*-unsigned.hap` 是构建产物存档，**不能直接安装**。
 
 App 里填服务器地址和配对码即可。凭据存在本地，之后启动直接进项目列表。
 
