@@ -1,0 +1,73 @@
+# ============================================================
+# 鸿蒙 / DevEco Studio
+# ============================================================
+/oh_modules
+**/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+/.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+**/.preview
+*.hap
+*.hsp
+*.har
+
+# 签名材料，绝不能进仓库
+*.p12
+*.cer
+*.p7b
+*.keystore
+
+# ============================================================
+# Node.js 服务端
+# ============================================================
+node_modules/
+/server/dist
+*.tsbuildinfo
+
+# 依赖锁文件保留（server/package-lock.json 要提交）
+# 但日志和缓存不要
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.eslintcache
+
+# ============================================================
+# 运行时数据与密钥
+# ============================================================
+# 服务端的 token 存储默认在 ~/.claude-harmony/，不在仓库内；
+# 但万一有人把 dataDir 指到项目里，这里兜一道底
+.claude-harmony/
+tokens.json
+config.local.json
+
+# 环境变量文件 —— ANTHROPIC_AUTH_TOKEN 之类绝不能提交
+.env
+.env.*
+!.env.example
+
+# ============================================================
+# 编辑器与系统
+# ============================================================
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+# 临时文件
+# ============================================================
+*.log
+*.tmp
+/tmp/
