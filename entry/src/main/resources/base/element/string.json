@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "Claude Code 远程连接器主模块"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "远程控制服务器上的 Claude Code 会话"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "CC-Remoter"
     }
   ]
 }

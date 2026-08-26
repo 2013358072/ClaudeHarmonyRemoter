@@ -1,5 +1,9 @@
 {
   "app": {
+    // 签名配置不入库：里面是本机绝对路径和密钥库口令，对别人无用且不该公开。
+    // 用 DevEco Studio 打开项目后，File → Project Structure → Signing Configs
+    // 勾选 "Automatically generate signature"，这里会被自动填上。
+    // 详见 docs/build-and-sign.md
     "signingConfigs": [],
     "products": [
       {
