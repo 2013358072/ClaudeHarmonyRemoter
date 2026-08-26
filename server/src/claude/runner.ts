@@ -8,8 +8,12 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { PushableAsyncIterable } from './pushable.js';
-import { normalize, errorEvent } from '../protocol/normalize.js';
-import type { WireEvent } from '../protocol/wire.js';
+import { normalize, errorEvent, summarizeTool } from '../protocol/normalize.js';
+import type {
+    WireEvent,
+    PermissionRequest,
+    PermissionDecision,
+} from '../protocol/wire.js';
 import type { PermissionMode } from '../config.js';
 
 /**
@@ -21,6 +25,43 @@ import type { PermissionMode } from '../config.js';
  * 用户会以为会话丢了。这里换成一个自定义值绕开那个过滤集合。
  */
 const ENTRYPOINT = 'harmony-remote';
+
+/**
+ * 权限请求的兜底超时。
+ *
+ * SDK 文档明确写着权限提示"没有 park deadline" —— 不回复就永久阻塞。
+ * 正常情况下客户端断开时我们会立刻拒绝掉所有待决请求，
+ * 这个超时只是防止出现谁也没想到的第三种情况让 runner 变成僵尸。
+ * 取值偏大，是因为人真的可能把手机放下几分钟再回来。
+ */
+const PERMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 一条待决的权限请求 */
+interface PendingPermission {
+    request: PermissionRequest;
+    /** 兑现 canUseTool 返回的那个 Promise */
+    settle: (decision: PermissionDecision) => void;
+    timer: NodeJS.Timeout;
+}
+
+/** 把工具参数渲染成可读文本，供用户判断该不该批准 */
+function renderDetail(toolName: string, input: Record<string, unknown>): string {
+    // Bash 最需要看全文 —— 摘要截断过的命令不足以做安全判断
+    const command = input['command'];
+    if (toolName === 'Bash' && typeof command === 'string') {
+        return command;
+    }
+    const summary = summarizeTool(toolName, input);
+    // 摘要已经包含关键信息时就不再堆 JSON，手机屏幕装不下
+    if (summary !== toolName) {
+        return summary;
+    }
+    try {
+        return JSON.stringify(input, null, 2).slice(0, 1200);
+    } catch {
+        return '';
+    }
+}
 
 export interface RunnerOptions {
     /** 项目工作目录 */
@@ -41,6 +82,10 @@ export interface RunnerOptions {
     onThinking: (thinking: boolean) => void;
     /** 拿到真实 session id 时调用（新建会话时这是唯一的获知途径） */
     onSessionId: (sessionId: string) => void;
+    /** Claude 要调用工具、需要用户批准时调用 */
+    onPermissionRequest: (request: PermissionRequest) => void;
+    /** 权限请求已失效（超时/会话结束），通知客户端收起弹窗 */
+    onPermissionClosed: (requestId: string) => void;
     /** 会话因故终止 */
     onFatal: (message: string) => void;
 }
@@ -53,6 +98,16 @@ export class ClaudeRunner {
     private sessionId: string | undefined;
     private started = false;
     private stopped = false;
+    /** requestId -> 待决请求 */
+    private pending = new Map<string, PendingPermission>();
+    /**
+     * 用户勾了「总是允许」的工具，以及 SDK 给出的对应权限更新。
+     *
+     * SDK 的 suggestions 是"把这条规则加进会话级权限"的指令，
+     * 返回给它之后本会话内同类调用就不会再问。但 SDK 只在**首次**询问时
+     * 给 suggestions，所以要自己记住，后续同名工具直接放行。
+     */
+    private remembered = new Map<string, unknown[]>();
     /** query() 返回的对象，用于 interrupt */
     private handle: AsyncIterable<unknown> & { interrupt?: () => Promise<void> } = null as never;
 
@@ -78,6 +133,11 @@ export class ClaudeRunner {
         }
         env['CLAUDE_CODE_ENTRYPOINT'] = ENTRYPOINT;
 
+        console.log(
+            `[runner] 启动会话 cwd=${opts.cwd} permissionMode=${opts.permissionMode}` +
+                `${opts.resumeSessionId ? ` resume=${opts.resumeSessionId}` : ''}`,
+        );
+
         try {
             const response = query({
                 prompt: this.input as AsyncIterable<never>,
@@ -87,6 +147,7 @@ export class ClaudeRunner {
                     permissionMode: opts.permissionMode,
                     abortController: this.abort,
                     env,
+                    canUseTool: this.canUseTool,
                     ...(opts.executablePath
                         ? { pathToClaudeCodeExecutable: opts.executablePath }
                         : {}),
@@ -123,7 +184,139 @@ export class ClaudeRunner {
             opts.onFatal(message);
         } finally {
             opts.onThinking(false);
+            // 消息循环结束后不会再有人来回答，留着只会挂死 SDK 那侧
+            this.denyAllPending();
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // 权限交互
+    // -------------------------------------------------------------------------
+
+    /**
+     * SDK 在每次工具调用前回调这里。
+     *
+     * 铁律：**这个 Promise 必须兑现**。SDK 文档写明权限提示没有超时机制，
+     * 返回 null 或永不 resolve 会让工具永久阻塞、整个会话卡死。
+     * 所以下面每一条分支——包括异常和中止——都必须走到 settle。
+     *
+     * 用箭头函数是为了绑定 this，SDK 会脱离实例直接调用它。
+     */
+    private canUseTool = (
+        toolName: string,
+        input: Record<string, unknown>,
+        options: {
+            signal: AbortSignal;
+            suggestions?: unknown[];
+            title?: string;
+            displayName?: string;
+            description?: string;
+            requestId: string;
+            toolUseID: string;
+        },
+    ): Promise<unknown> => {
+        // 会话已停：立刻拒绝，别让 SDK 干等
+        if (this.stopped) {
+            return Promise.resolve({
+                behavior: 'deny',
+                message: '会话已结束',
+            });
+        }
+
+        // 用户之前对这个工具选过「总是允许」
+        const remembered = this.remembered.get(toolName);
+        if (remembered) {
+            return Promise.resolve({
+                behavior: 'allow',
+                updatedPermissions: remembered,
+            });
+        }
+
+        const suggestions = options.suggestions;
+        const canRemember = Array.isArray(suggestions) && suggestions.length > 0;
+
+        const displayName = options.displayName ?? toolName;
+        const request: PermissionRequest = {
+            id: options.requestId,
+            toolName,
+            // SDK 说 title 是渲染好的完整提示句，优先用它 —— 自己按工具名拼
+            // 措辞容易和 Claude Code 本体不一致。但实测它经常是 undefined
+            // （description 里反而带着目标文件名），所以兜底不能省。
+            title: options.title ?? `Claude 想要使用 ${displayName}`,
+            displayName,
+            description: options.description ?? '',
+            detail: renderDetail(toolName, input),
+            canRemember,
+        };
+
+        console.log(`[runner] 请求权限 ${toolName} (${options.requestId})`);
+
+        return new Promise((resolve) => {
+            let done = false;
+            const settle = (decision: PermissionDecision): void => {
+                if (done) return;
+                done = true;
+                this.pending.delete(options.requestId);
+                clearTimeout(timer);
+
+                console.log(`[runner] 权限 ${toolName} -> ${decision}`);
+
+                if (decision === 'deny') {
+                    resolve({
+                        behavior: 'deny',
+                        message: '用户在手机上拒绝了这次操作',
+                    });
+                    return;
+                }
+                if (decision === 'always' && canRemember) {
+                    this.remembered.set(toolName, suggestions);
+                    resolve({ behavior: 'allow', updatedPermissions: suggestions });
+                    return;
+                }
+                resolve({ behavior: 'allow' });
+            };
+
+            // 兜底超时，防止出现意料之外的路径把 runner 挂成僵尸
+            const timer = setTimeout(() => {
+                console.warn(`[runner] 权限请求 ${options.requestId} 超时，按拒绝处理`);
+                this.opts.onPermissionClosed(options.requestId);
+                settle('deny');
+            }, PERMISSION_TIMEOUT_MS);
+
+            // 用户按了「停止」会触发 abort，此时也要放行这个 Promise
+            options.signal.addEventListener(
+                'abort',
+                () => {
+                    this.opts.onPermissionClosed(options.requestId);
+                    settle('deny');
+                },
+                { once: true },
+            );
+
+            this.pending.set(options.requestId, { request, settle, timer });
+            this.opts.onPermissionRequest(request);
+        });
+    };
+
+    /** 客户端回复了某条权限请求 */
+    resolvePermission(requestId: string, decision: PermissionDecision): boolean {
+        const entry = this.pending.get(requestId);
+        if (!entry) return false;
+        entry.settle(decision);
+        return true;
+    }
+
+    /** 当前所有待决请求，用于重连后补发 */
+    listPending(): PermissionRequest[] {
+        return [...this.pending.values()].map((p) => p.request);
+    }
+
+    /** 全部拒绝掉待决请求。会话结束或客户端断开时必须调用 */
+    private denyAllPending(): void {
+        for (const entry of [...this.pending.values()]) {
+            entry.settle('deny');
+        }
+        this.pending.clear();
     }
 
     /** 发一条用户消息 */
@@ -141,6 +334,12 @@ export class ClaudeRunner {
     /** 打断当前这一轮 */
     async interrupt(): Promise<void> {
         if (this.stopped) return;
+        // 打断时若正卡在权限确认上，先把弹窗关掉并拒绝，
+        // 否则手机上会留着一个已经没有意义的确认框
+        for (const entry of [...this.pending.values()]) {
+            this.opts.onPermissionClosed(entry.request.id);
+        }
+        this.denyAllPending();
         try {
             await this.handle?.interrupt?.();
         } catch (e) {
@@ -153,6 +352,9 @@ export class ClaudeRunner {
     stop(): void {
         if (this.stopped) return;
         this.stopped = true;
+        // 顺序要紧：先把待决权限全部拒掉再 abort。
+        // 否则 SDK 那边还挂着未兑现的 Promise，abort 不一定能把它唤醒。
+        this.denyAllPending();
         this.input.close();
         this.abort.abort();
     }

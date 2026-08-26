@@ -59,10 +59,45 @@ export interface WireEvent {
 }
 
 // ============================================================================
+// 权限请求
+// ============================================================================
+
+/**
+ * Claude 想调用工具时向手机发起的确认请求。
+ *
+ * 字段大部分直接来自 SDK 的 canUseTool 回调 —— 它已经把提示语渲染好了
+ * （title / displayName / description），不需要我们从工具名和参数硬拼，
+ * 拼出来的措辞还容易和 Claude Code 本体不一致。
+ */
+export interface PermissionRequest {
+    /** SDK 的 requestId，回复时必须原样带回 */
+    id: string;
+    toolName: string;
+    /** 主提示句，如 "Claude wants to read foo.txt" */
+    title: string;
+    /** 短名词，如 "Read file"，适合按钮和紧凑 UI */
+    displayName: string;
+    /** 副标题，说明这次授权的影响范围 */
+    description: string;
+    /** 工具参数的可读摘要，如完整的 bash 命令 */
+    detail: string;
+    /** 是否支持「总是允许」。SDK 给了 suggestions 才为真 */
+    canRemember: boolean;
+}
+
+/** 用户的决定 */
+export type PermissionDecision = 'allow' | 'always' | 'deny';
+
+// ============================================================================
 // 上行消息（客户端 → 服务端）
 // ============================================================================
 
-export type ClientMessageType = 'attach' | 'send' | 'interrupt' | 'detach';
+export type ClientMessageType =
+    | 'attach'
+    | 'send'
+    | 'interrupt'
+    | 'detach'
+    | 'permission_response';
 
 export interface ClientMessage {
     type: ClientMessageType;
@@ -72,6 +107,10 @@ export interface ClientMessage {
     sessionId?: string;
     /** type='send' 时必填 */
     text?: string;
+    /** type='permission_response' 时必填 */
+    requestId?: string;
+    /** type='permission_response' 时必填 */
+    decision?: PermissionDecision;
 }
 
 // ============================================================================
@@ -79,10 +118,12 @@ export interface ClientMessage {
 // ============================================================================
 
 export type ServerMessageType =
-    | 'attached'   // 会话已就绪，回传真实 sessionId
-    | 'event'      // 一条 WireEvent
-    | 'thinking'   // Claude 是否正在思考，用于客户端显示加载态
-    | 'fatal';     // 致命错误，会话已终止
+    | 'attached'            // 会话已就绪，回传真实 sessionId
+    | 'event'               // 一条 WireEvent
+    | 'thinking'            // Claude 是否正在思考，用于客户端显示加载态
+    | 'permission_request'  // 需要用户批准工具调用
+    | 'permission_closed'   // 该权限请求已失效，客户端应收起弹窗
+    | 'fatal';              // 致命错误，会话已终止
 
 export interface ServerMessage {
     type: ServerMessageType;
@@ -94,6 +135,10 @@ export interface ServerMessage {
     value?: boolean;
     /** type='fatal' 时有效 */
     message?: string;
+    /** type='permission_request' 时有效 */
+    request?: PermissionRequest;
+    /** type='permission_closed' 时有效 */
+    requestId?: string;
 }
 
 // ============================================================================

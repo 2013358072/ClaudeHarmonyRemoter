@@ -34,12 +34,12 @@ export interface AppConfig {
     /**
      * 传给 Claude Code 的权限模式。
      *
-     * 首版默认 bypassPermissions：因为客户端还没实现权限交互界面，
-     * 若用 default，Claude 一旦要改文件或跑命令就会卡住等批准，
-     * 手机端将永远收不到回复。
+     * 默认 default：客户端已实现权限交互，Claude 要改文件或跑命令时
+     * 手机上会弹确认框，用户可以选允许 / 总是允许 / 拒绝。
      *
-     * 代价是手机发出的指令会在服务器上无确认地执行文件修改和 shell 命令，
-     * 所以务必配合 projectRoots 白名单使用。
+     * 想回到"全部自动放行"可以显式配成 bypassPermissions，
+     * 但那意味着手机指令会在服务器上无确认执行 shell 命令，
+     * 务必配合 projectRoots 白名单。
      */
     permissionMode: PermissionMode;
     /** 配对码有效期（毫秒） */
@@ -146,7 +146,7 @@ export function loadConfig(): AppConfig {
         projectRoots: normalizeRoots(envRoots ?? file.projectRoots),
         permissionMode: parsePermissionMode(
             process.env.CLAUDE_HARMONY_PERMISSION_MODE,
-            file.permissionMode ?? 'bypassPermissions',
+            file.permissionMode ?? 'default',
         ),
         pairingTtlMs: file.pairingTtlMs ?? 5 * 60 * 1000,
         dataDir,

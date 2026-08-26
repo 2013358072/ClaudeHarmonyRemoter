@@ -15,6 +15,8 @@ import {
   ClientMessage,
   ServerMessage,
   WireEvent,
+  PermissionRequest,
+  PermissionDecision,
   ClientMsgType,
   ServerMsgType
 } from './Protocol';
@@ -33,6 +35,10 @@ export interface WsCallbacks {
   onAttached: (sessionId: string) => void;
   onEvent: (event: WireEvent) => void;
   onThinking: (thinking: boolean) => void;
+  /** Claude 要用工具，需要用户批准 */
+  onPermissionRequest: (request: PermissionRequest) => void;
+  /** 该权限请求已失效，收起弹窗 */
+  onPermissionClosed: (requestId: string) => void;
   onFatal: (message: string) => void;
 }
 
@@ -191,6 +197,12 @@ export class WsClient {
       }
     } else if (msg.type === ServerMsgType.THINKING) {
       cb.onThinking(msg.value === true);
+    } else if (msg.type === ServerMsgType.PERMISSION_REQUEST) {
+      if (msg.request !== undefined) {
+        cb.onPermissionRequest(msg.request);
+      }
+    } else if (msg.type === ServerMsgType.PERMISSION_CLOSED) {
+      cb.onPermissionClosed(msg.requestId ?? '');
     } else if (msg.type === ServerMsgType.FATAL) {
       cb.onFatal(msg.message ?? '会话异常终止');
     }
@@ -225,6 +237,15 @@ export class WsClient {
 
   interrupt(): void {
     this.send({ type: ClientMsgType.INTERRUPT } as ClientMessage);
+  }
+
+  /** 回复权限请求 */
+  respondPermission(requestId: string, decision: PermissionDecision): void {
+    this.send({
+      type: ClientMsgType.PERMISSION_RESPONSE,
+      requestId: requestId,
+      decision: decision
+    } as ClientMessage);
   }
 
   detach(): void {

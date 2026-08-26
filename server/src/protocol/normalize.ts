@@ -60,7 +60,7 @@ function eventId(stable: string | undefined, suffix?: string): string {
  * 给工具调用生成一行人类可读的摘要。
  * 手机屏幕窄，展示完整的 input JSON 没有意义。
  */
-function summarizeTool(name: string, input: unknown): string {
+export function summarizeTool(name: string, input: unknown): string {
     if (!isDict(input)) return name;
 
     const filePath = str(input['file_path']);

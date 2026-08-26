@@ -146,6 +146,21 @@ export function attachWebSocket(server: Server, deps: WsDeps): () => void {
                 return;
             }
 
+            case 'permission_response': {
+                const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+                const decision = msg.decision;
+                if (!requestId || !decision) return;
+                if (decision !== 'allow' && decision !== 'always' && decision !== 'deny') {
+                    return;
+                }
+                const ok = conn.runner?.resolvePermission(requestId, decision) ?? false;
+                if (!ok) {
+                    // 请求已经失效（超时/被打断），让客户端收起弹窗
+                    send(conn.socket, { type: 'permission_closed', requestId });
+                }
+                return;
+            }
+
             case 'interrupt':
                 await conn.runner?.interrupt();
                 return;
@@ -185,6 +200,10 @@ export function attachWebSocket(server: Server, deps: WsDeps): () => void {
             onEvent: (event) => send(conn.socket, { type: 'event', payload: event }),
             onThinking: (value) => send(conn.socket, { type: 'thinking', value }),
             onSessionId: (sessionId) => send(conn.socket, { type: 'attached', sessionId }),
+            onPermissionRequest: (request) =>
+                send(conn.socket, { type: 'permission_request', request }),
+            onPermissionClosed: (requestId) =>
+                send(conn.socket, { type: 'permission_closed', requestId }),
             onFatal: (message) => send(conn.socket, { type: 'fatal', message }),
         });
         conn.runner = runner;

@@ -79,6 +79,7 @@ ArkTS 不支持 `any`，对动态对象和联合类型窄化的检查也比 Type
 {"type": "send", "text": "..."}
 {"type": "interrupt"}
 {"type": "detach"}
+{"type": "permission_response", "requestId": "...", "decision": "allow"}  // allow|always|deny
 ```
 
 ### 下行
@@ -87,6 +88,8 @@ ArkTS 不支持 `any`，对动态对象和联合类型窄化的检查也比 Type
 {"type": "attached", "sessionId": "..."}
 {"type": "event", "payload": { /* WireEvent */ }}
 {"type": "thinking", "value": true}
+{"type": "permission_request", "request": { /* PermissionRequest */ }}
+{"type": "permission_closed", "requestId": "..."}
 {"type": "fatal", "message": "..."}
 ```
 
@@ -104,6 +107,48 @@ ArkTS 不支持 `any`，对动态对象和联合类型窄化的检查也比 Type
 客户端收到 `attached` 即可发送；每次都用非空的 `sessionId` 更新本地记录（断线重连时要靠它续接同一会话）。
 
 ---
+
+## 权限交互
+
+Claude 要动文件或跑命令时，手机上弹确认框。
+
+### PermissionRequest
+
+| 字段 | 说明 |
+|---|---|
+| `id` | SDK 的 `requestId`，回复时必须原样带回 |
+| `toolName` | 工具名，如 `Write` |
+| `title` | 主提示句 |
+| `displayName` | 短名词，适合按钮 |
+| `description` | 副标题，通常是目标文件名 |
+| `detail` | 参数详情。Bash 给完整命令，其余给摘要 |
+| `canRemember` | 是否支持「总是允许」 |
+
+`decision` 三选一：`allow`（本次）/ `always`（本会话内该工具不再询问）/ `deny`。
+
+### 铁律：这个 Promise 必须兑现
+
+SDK 文档明确写着权限提示**没有 park deadline** —— `canUseTool` 返回 null 或永不 resolve，工具就永久阻塞，整个会话卡死。
+
+所以服务端每一条退出路径都必须走到 settle：
+
+- 客户端回复 → 按决定 settle
+- 客户端断开 / 切换会话 → `stop()` 里 `denyAllPending()`
+- 用户点「停止」→ abort 信号触发 → 拒绝
+- 消息循环结束 → `finally` 里再兜一次
+- 30 分钟超时 → 兜底拒绝（防止出现没想到的第四种情况让 runner 变僵尸）
+
+`stop()` 里的顺序也有讲究：**先拒绝待决权限，再 abort**。反过来的话 SDK 那侧还挂着未兑现的 Promise，abort 不一定能把它唤醒。
+
+### 不是每次工具调用都会问
+
+Claude Code 有安全分类器，无害操作直接放行。实测 `echo hello` 这类命令在 `default` 甚至 `dontAsk` 模式下都不会触发 `canUseTool`，而写文件会。
+
+调试权限功能时别拿 `echo` 试，会误判成功能没接通 —— 用写文件。
+
+### `title` 常常是 undefined
+
+SDK 类型定义说 `title` 是"bridge 渲染好的完整提示句（如 Claude wants to read foo.txt）"，但实测经常拿不到，反而是 `description` 里带着目标文件名。所以兜底文案不能省。
 
 ## 会话与项目的识别
 

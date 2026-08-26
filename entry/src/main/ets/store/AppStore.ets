@@ -5,7 +5,7 @@
  * V1 的 @Observed/@ObjectLink 对数组元素属性变更的追踪不够直接。
  */
 
-import { WireEvent, ProjectInfo, SessionInfo, EventKind } from '../net/Protocol';
+import { WireEvent, ProjectInfo, SessionInfo, EventKind, PermissionRequest } from '../net/Protocol';
 import { WsState } from '../net/WsClient';
 
 /**
@@ -81,6 +81,15 @@ export class AppStore {
   /** 非空时在聊天页顶部显示错误条 */
   @Trace banner: string = '';
 
+  // ---- 权限交互 ----
+  /**
+   * 当前待确认的权限请求，非空时聊天页弹出确认框。
+   *
+   * 只保留一条：Claude 一次只会问一个，多条并发时后到的会覆盖前一条，
+   * 而服务端对未回复的请求有兜底拒绝，不会卡死。
+   */
+  @Trace pendingPermission: PermissionRequest | null = null;
+
   /** id -> items 下标，工具事件按 id 覆盖时用 */
   private index: Map<string, number> = new Map();
 
@@ -125,6 +134,18 @@ export class AppStore {
     this.thinking = false;
     this.banner = '';
     this.currentSessionId = '';
+    this.pendingPermission = null;
+  }
+
+  /** 收起指定的权限弹窗。requestId 为空表示无条件收起 */
+  closePermission(requestId: string): void {
+    const p = this.pendingPermission;
+    if (p === null) {
+      return;
+    }
+    if (requestId.length === 0 || p.id === requestId) {
+      this.pendingPermission = null;
+    }
   }
 }
 

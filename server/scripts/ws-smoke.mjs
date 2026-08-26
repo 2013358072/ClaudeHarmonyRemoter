@@ -17,6 +17,8 @@ const PORT = process.env.CLAUDE_HARMONY_PORT ?? '4517';
 const BASE = `ws://127.0.0.1:${PORT}/ws`;
 /** 要发的提示词，用 PROMPT 环境变量覆盖（续接验证时会换成追问） */
 const PROMPT = process.env.PROMPT ?? '请回复 OK 两个字';
+/** 收到权限请求时怎么答：allow / always / deny，默认 allow */
+const DECIDE = process.env.DECIDE ?? 'allow';
 
 if (!token) {
     console.error('用法: node scripts/ws-smoke.mjs <token> [projectId] [sessionId]');
@@ -104,6 +106,22 @@ function testSession() {
                 }
             } else if (msg.type === 'thinking') {
                 console.log(`  ← thinking=${msg.value}`);
+            } else if (msg.type === 'permission_request') {
+                const r = msg.request;
+                console.log(`  ← 🔒 权限请求 ${r.id}`);
+                console.log(`       displayName : ${r.displayName}`);
+                console.log(`       title       : ${r.title}`);
+                console.log(`       description : ${r.description || '(空)'}`);
+                console.log(`       detail      : ${(r.detail || '').slice(0, 90)}`);
+                console.log(`       canRemember : ${r.canRemember}`);
+                console.log(`  → 回复 ${DECIDE}`);
+                ws.send(JSON.stringify({
+                    type: 'permission_response',
+                    requestId: r.id,
+                    decision: DECIDE,
+                }));
+            } else if (msg.type === 'permission_closed') {
+                console.log(`  ← 权限请求 ${msg.requestId} 已关闭`);
             } else if (msg.type === 'fatal') {
                 console.log(`  ← fatal: ${msg.message}`);
                 finish(true);

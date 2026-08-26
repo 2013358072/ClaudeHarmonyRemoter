@@ -9,7 +9,15 @@
 import { apiClient, ApiException } from '../net/ApiClient';
 import { wsClient, WsState } from '../net/WsClient';
 import { appStore, ChatItem } from '../store/AppStore';
-import { WireEvent, EventKind, Role, ToolStatus } from '../net/Protocol';
+import {
+  WireEvent,
+  EventKind,
+  Role,
+  ToolStatus,
+  PermissionRequest,
+  PermissionDecision,
+  Decision
+} from '../net/Protocol';
 import { formatDuration, formatCost } from '../utils/Format';
 
 /** 路由参数 */
@@ -73,9 +81,16 @@ export struct ChatView {
       onThinking: (thinking: boolean): void => {
         appStore.thinking = thinking;
       },
+      onPermissionRequest: (request: PermissionRequest): void => {
+        appStore.pendingPermission = request;
+      },
+      onPermissionClosed: (requestId: string): void => {
+        appStore.closePermission(requestId);
+      },
       onFatal: (message: string): void => {
         appStore.banner = message;
         appStore.thinking = false;
+        appStore.closePermission('');
       }
     });
     wsClient.connect();
@@ -206,6 +221,100 @@ export struct ChatView {
       .width('100%')
   }
 
+  /** 回复权限请求并收起弹窗 */
+  private decide(decision: PermissionDecision): void {
+    const p = appStore.pendingPermission;
+    if (p === null) {
+      return;
+    }
+    wsClient.respondPermission(p.id, decision);
+    appStore.pendingPermission = null;
+  }
+
+  @Builder
+  permissionSheet(req: PermissionRequest) {
+    Column() {
+      // 半透明遮罩：点击不关闭 —— 权限必须明确表态，
+      // 误触关掉会让 Claude 那边一直等着
+      Column()
+        .layoutWeight(1)
+        .width('100%')
+        .backgroundColor('#66000000')
+
+      Column({ space: 12 }) {
+        Row({ space: 8 }) {
+          Text('🔒').fontSize(18)
+          Text(req.displayName)
+            .fontSize(18)
+            .fontWeight(FontWeight.Bold)
+            .layoutWeight(1)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+        .width('100%')
+
+        Text(req.title)
+          .fontSize(15)
+          .width('100%')
+
+        if (req.description.length > 0) {
+          Text(req.description)
+            .fontSize(13)
+            .fontColor($r('sys.color.font_secondary'))
+            .width('100%')
+        }
+
+        if (req.detail.length > 0) {
+          // 参数详情可能很长（比如整条 bash 命令），给它独立滚动区，
+          // 避免把按钮挤出屏幕
+          Scroll() {
+            Text(req.detail)
+              .fontSize(12)
+              .fontFamily('monospace')
+              .fontColor($r('sys.color.font_secondary'))
+              .width('100%')
+              .textAlign(TextAlign.Start)
+          }
+          .constraintSize({ maxHeight: 160 })
+          .width('100%')
+          .padding(10)
+          .backgroundColor($r('sys.color.comp_background_secondary'))
+          .borderRadius(8)
+          .align(Alignment.TopStart)
+        }
+
+        Row({ space: 10 }) {
+          Button('拒绝')
+            .layoutWeight(1)
+            .backgroundColor($r('sys.color.comp_background_secondary'))
+            .fontColor($r('sys.color.font_primary'))
+            .onClick(() => this.decide(Decision.DENY))
+
+          Button('允许')
+            .layoutWeight(1)
+            .onClick(() => this.decide(Decision.ALLOW))
+        }
+        .width('100%')
+        .margin({ top: 4 })
+
+        if (req.canRemember) {
+          Button(`本次会话内总是允许「${req.displayName}」`)
+            .width('100%')
+            .backgroundColor(Color.Transparent)
+            .fontColor($r('sys.color.font_emphasize'))
+            .fontSize(14)
+            .onClick(() => this.decide(Decision.ALWAYS))
+        }
+      }
+      .width('100%')
+      .padding(20)
+      .backgroundColor($r('sys.color.comp_background_primary'))
+      .borderRadius({ topLeft: 16, topRight: 16 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   @Builder
   itemView(item: ChatItem) {
     if (item.kind === EventKind.TEXT) {
@@ -221,6 +330,7 @@ export struct ChatView {
 
   build() {
     NavDestination() {
+      Stack() {
       Column() {
         this.connectionBar()
 
@@ -278,6 +388,15 @@ export struct ChatView {
       }
       .width('100%')
       .height('100%')
+
+        // 权限确认覆盖在聊天界面之上
+        if (appStore.pendingPermission !== null) {
+          this.permissionSheet(appStore.pendingPermission)
+        }
+      }
+      .width('100%')
+      .height('100%')
+      .alignContent(Alignment.Bottom)
     }
     .title(this.param.title)
   }

@@ -36,10 +36,37 @@ export interface WireEvent {
 }
 
 // ============================================================================
+// 权限请求
+// ============================================================================
+
+/**
+ * Claude 想调用工具时的确认请求。
+ * title / displayName / description 都是服务端从 SDK 拿到的现成文案，
+ * 客户端直接显示即可，不要自己拼措辞。
+ */
+export interface PermissionRequest {
+  id: string;
+  toolName: string;
+  /** 主提示句 */
+  title: string;
+  /** 短名词，适合按钮 */
+  displayName: string;
+  /** 副标题，说明授权影响范围 */
+  description: string;
+  /** 工具参数详情，如完整的 bash 命令 */
+  detail: string;
+  /** 是否支持「总是允许」 */
+  canRemember: boolean;
+}
+
+/** 'allow' | 'always' | 'deny' */
+export type PermissionDecision = string;
+
+// ============================================================================
 // 上行消息（客户端 → 服务端）
 // ============================================================================
 
-/** 'attach' | 'send' | 'interrupt' | 'detach' */
+/** 'attach' | 'send' | 'interrupt' | 'detach' | 'permission_response' */
 export type ClientMessageType = string;
 
 export interface ClientMessage {
@@ -47,13 +74,15 @@ export interface ClientMessage {
   projectId?: string;
   sessionId?: string;
   text?: string;
+  requestId?: string;
+  decision?: PermissionDecision;
 }
 
 // ============================================================================
 // 下行消息（服务端 → 客户端）
 // ============================================================================
 
-/** 'attached' | 'event' | 'thinking' | 'fatal' */
+/** 'attached' | 'event' | 'thinking' | 'permission_request' | 'permission_closed' | 'fatal' */
 export type ServerMessageType = string;
 
 export interface ServerMessage {
@@ -62,6 +91,8 @@ export interface ServerMessage {
   payload?: WireEvent;
   value?: boolean;
   message?: string;
+  request?: PermissionRequest;
+  requestId?: string;
 }
 
 // ============================================================================
@@ -127,11 +158,20 @@ export class ClientMsgType {
   static readonly SEND: string = 'send';
   static readonly INTERRUPT: string = 'interrupt';
   static readonly DETACH: string = 'detach';
+  static readonly PERMISSION_RESPONSE: string = 'permission_response';
 }
 
 export class ServerMsgType {
   static readonly ATTACHED: string = 'attached';
   static readonly EVENT: string = 'event';
   static readonly THINKING: string = 'thinking';
+  static readonly PERMISSION_REQUEST: string = 'permission_request';
+  static readonly PERMISSION_CLOSED: string = 'permission_closed';
   static readonly FATAL: string = 'fatal';
+}
+
+export class Decision {
+  static readonly ALLOW: string = 'allow';
+  static readonly ALWAYS: string = 'always';
+  static readonly DENY: string = 'deny';
 }
