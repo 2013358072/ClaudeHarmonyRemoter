@@ -91,15 +91,6 @@ App 里填服务器地址和配对码。凭据存在本地，之后启动直接�
 
 本项目的架构设计大量参考了 **[slopus/happy](https://github.com/slopus/happy)**（MIT）—— Claude Code 与 Codex 的移动端/Web 客户端。
 
-在动手之前，我们把它的 `happy-cli` 读了个透。几个关键认知直接来自它，没有这些参考会走很多弯路：
-
-- **驱动方式的选择**。原本打算走「监控会话文件 + 模拟按键注入」的路子。是 Happy 的 `claudeRemote.ts` 证明了 `@anthropic-ai/claude-agent-sdk` 才是正解——它不是 Anthropic API 客户端，而是把 Claude Code 打包成库，因此中转配置原样生效。这一条推翻了我们最初的整个技术方案。
-- **`CLAUDE_CODE_ENTRYPOINT` 陷阱**。Agent SDK 默认把该变量设为 `sdk-ts`，而 `claude --resume` 的选择器会隐藏这类会话。Happy 在 [slopus/happy#1202](https://github.com/slopus/happy/issues/1202) 里踩过并留下了注释，我们才没重蹈覆辙。
-- **会话文件的识别规则**。`--resume` 只接受 UUID 格式、`agent-*` 子会话必须过滤——这些都来自 `claudeFindLastSession.ts`。
-- **流式输入的形态**。用一个可外部推送的异步迭代器喂给 `query()`，让会话长驻，出自 `PushableAsyncIterable`。本项目的实现是重写的，但思路来自这里。
-
-感谢 Happy 团队把这些踩坑经验开源出来。如果你用 iOS、Android 或 Web，**请直接去用 Happy**——它成熟得多，功能也完整得多（端到端加密、推送通知、语音、桌面端）。本项目只是补上鸿蒙这一块空缺。
-
 ## 📋 当前进度
 
 已完成并实测通过：
