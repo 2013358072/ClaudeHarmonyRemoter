@@ -9,19 +9,14 @@ import { ProjectInfo } from '../net/Protocol';
 import { SessionListParam } from './SessionList';
 import { formatRelativeTime } from '../utils/Format';
 
-@Component
+@ComponentV2
 export struct ProjectListView {
-  @Consume('pathStack') pathStack: NavPathStack;
-  @State projects: ProjectInfo[] = [];
-  @State loading: boolean = true;
-  @State errorText: string = '';
+  @Consumer() pathStack: NavPathStack = new NavPathStack();
+  @Local projects: ProjectInfo[] = [];
+  @Local loading: boolean = true;
+  @Local errorText: string = '';
 
   aboutToAppear(): void {
-    this.load();
-  }
-
-  /** 从其他页返回时刷新，会话数和活跃时间可能已变 */
-  onPageShow(): void {
     this.load();
   }
 

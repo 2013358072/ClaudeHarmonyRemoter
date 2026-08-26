@@ -2,7 +2,15 @@
  * 全局状态。
  *
  * 用 V2 状态管理（@ObservedV2 + @Trace）：聊天列表是频繁增删的深层数据，
- * V1 的 @Observed/@ObjectLink 对数组元素属性变更的追踪不够直接。
+ * V2 的深度观察能直接追踪到数组元素的属性变更。
+ *
+ * ⚠ 读这个 store 的组件必须是 @ComponentV2。
+ *
+ * @Trace 的变更只对 @ComponentV2 生效。用 V1 的 @Component 去读，
+ * 首次渲染能拿到值，之后就再也不刷新了 —— 而且**不报任何错**。
+ * 本项目就踩过：页面一开始是 @Component，表现为连接状态永远停在
+ * "正在重连"、消息也不流式更新，看起来像 WebSocket 没连上，
+ * 实际是界面压根不重渲染。所有页面已统一为 V2，新增页面也必须是 V2。
  */
 
 import { WireEvent, ProjectInfo, SessionInfo, EventKind, PermissionRequest } from '../net/Protocol';

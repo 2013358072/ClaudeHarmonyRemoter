@@ -12,21 +12,21 @@ import { appStore } from '../store/AppStore';
 import { PairResponse, PingResponse } from '../net/Protocol';
 import { deviceInfo } from '@kit.BasicServicesKit';
 
-@Component
+@ComponentV2
 export struct PairingView {
   /** 配对成功回调，由宿主切换根页面 */
-  onPaired: () => void = () => {};
+  @Event onPaired: () => void = () => {};
 
-  @State host: string = '';
-  @State port: string = '4517';
-  @State code: string = '';
+  @Local host: string = '';
+  @Local port: string = '4517';
+  @Local code: string = '';
 
   /** 地址是否已通过 ping 校验 */
-  @State hostVerified: boolean = false;
-  @State verifiedServerName: string = '';
+  @Local hostVerified: boolean = false;
+  @Local verifiedServerName: string = '';
 
-  @State busy: boolean = false;
-  @State errorText: string = '';
+  @Local busy: boolean = false;
+  @Local errorText: string = '';
 
   private parsePort(): number {
     const n = Number.parseInt(this.port, 10);

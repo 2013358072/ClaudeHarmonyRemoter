@@ -13,14 +13,14 @@ export interface SessionListParam {
   projectName: string;
 }
 
-@Component
+@ComponentV2
 export struct SessionListView {
-  @Consume('pathStack') pathStack: NavPathStack;
-  param: SessionListParam = { projectId: '', projectName: '' };
+  @Consumer() pathStack: NavPathStack = new NavPathStack();
+  @Param param: SessionListParam = { projectId: '', projectName: '' };
 
-  @State sessions: SessionInfo[] = [];
-  @State loading: boolean = true;
-  @State errorText: string = '';
+  @Local sessions: SessionInfo[] = [];
+  @Local loading: boolean = true;
+  @Local errorText: string = '';
 
   aboutToAppear(): void {
     this.load();

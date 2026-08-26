@@ -29,13 +29,13 @@ export interface ChatParam {
   title: string;
 }
 
-@Component
+@ComponentV2
 export struct ChatView {
-  @Consume('pathStack') pathStack: NavPathStack;
-  param: ChatParam = { projectId: '', projectName: '', sessionId: '', title: '' };
+  @Consumer() pathStack: NavPathStack = new NavPathStack();
+  @Param param: ChatParam = { projectId: '', projectName: '', sessionId: '', title: '' };
 
-  @State draft: string = '';
-  @State loadingHistory: boolean = true;
+  @Local draft: string = '';
+  @Local loadingHistory: boolean = true;
 
   private scroller: Scroller = new Scroller();
 
@@ -55,6 +55,12 @@ export struct ChatView {
       }
     }
     this.loadingHistory = false;
+
+    // 历史铺完直接定位到最新一条 —— 进来就看到最近的对话，
+    // 而不是从几百条之前开始往下翻。
+    // 延时比实时消息那次长：这里要等整个列表首次布局完成，
+    // 50ms 往往还没算出最终高度。
+    this.scrollToBottom(220);
 
     this.connect();
   }
@@ -93,17 +99,19 @@ export struct ChatView {
         appStore.closePermission('');
       }
     });
-    wsClient.connect();
+    // fresh=true：这是用户主动进入聊天页，清掉上个会话遗留的重试计数，
+    // 否则一进来就显示"正在重连"
+    wsClient.connect(true);
     // connect 是异步的，attach 要等 open 之后；WsClient 内部会在 open 时
     // 自动补发 attach，所以这里先登记目标会话即可
     wsClient.attach(this.param.projectId, this.param.sessionId);
   }
 
-  private scrollToBottom(): void {
-    // 等这一帧渲染完再滚，否则拿到的还是旧高度
+  /** 滚到底部。delay 要留够渲染时间，否则拿到的还是旧高度 */
+  private scrollToBottom(delay: number = 50): void {
     setTimeout(() => {
       this.scroller.scrollEdge(Edge.Bottom);
-    }, 50);
+    }, delay);
   }
 
   private submit(): void {

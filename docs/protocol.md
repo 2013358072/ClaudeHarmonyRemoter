@@ -150,6 +150,26 @@ Claude Code 有安全分类器，无害操作直接放行。实测 `echo hello` 
 
 SDK 类型定义说 `title` 是"bridge 渲染好的完整提示句（如 Claude wants to read foo.txt）"，但实测经常拿不到，反而是 `description` 里带着目标文件名。所以兜底文案不能省。
 
+## 鸿蒙端：状态管理必须统一用 V2
+
+`AppStore` 是 `@ObservedV2` + `@Trace`，**读它的组件必须是 `@ComponentV2`**。
+
+`@Trace` 的变更只对 `@ComponentV2` 生效。用 V1 的 `@Component` 去读，首次渲染能拿到值，之后再也不刷新 —— 而且编译和运行都**不报任何错**。
+
+这个坑的表现具有迷惑性：连接状态永远停在"正在重连"、消息不流式更新，看起来像 WebSocket 没连上，实际是界面压根不重渲染。排查时容易一头扎进网络层。
+
+配套的对应关系：
+
+| V1 | V2 |
+|---|---|
+| `@Component` | `@ComponentV2` |
+| `@State` | `@Local` |
+| 外部传入的成员 | `@Param` |
+| 回调 | `@Event` |
+| `@Provide` / `@Consume` | `@Provider()` / `@Consumer()` |
+
+另外 `onPageShow` 只对 `@Entry` 组件生效，普通子组件里写了不会触发，是死代码。
+
 ## 会话与项目的识别
 
 ### 项目路径不能从目录名反解

@@ -84,9 +84,19 @@ export class WsClient {
   // 连接
   // -------------------------------------------------------------------------
 
-  connect(): void {
+  /**
+   * 建立连接。
+   *
+   * @param fresh 是否是一次全新的连接（用户主动进入聊天页）。
+   *   全新连接要把重试计数清零，否则上一个会话遗留的 retryCount
+   *   会让状态直接是 RECONNECTING，界面一进来就显示"正在重连"。
+   */
+  connect(fresh: boolean = false): void {
     if (this.state === WsState.CONNECTING || this.state === WsState.OPEN) {
       return;
+    }
+    if (fresh) {
+      this.retryCount = 0;
     }
     this.manualClose = false;
     this.setState(this.retryCount > 0 ? WsState.RECONNECTING : WsState.CONNECTING);
@@ -114,6 +124,10 @@ export class WsClient {
     });
 
     ws.on('close', () => {
+      // 已经被 connect 回调或 close() 处理过了，不重复排重连
+      if (this.ws !== ws) {
+        return;
+      }
       this.ws = null;
       if (this.manualClose) {
         this.setState(WsState.CLOSED);
@@ -131,7 +145,11 @@ export class WsClient {
       'Authorization': `Bearer ${this.token}`
     };
     ws.connect(this.url, { header: header }, (err: BusinessError) => {
-      if (err) {
+      // 连接失败时 close 事件通常也会来一次，两边都排重连会让
+      // retryCount 翻倍、退避时间失真。这里只在当前 socket 还是它
+      // 自己时处理，close 里那次会因为 this.ws 已置空而跳过。
+      if (err && this.ws === ws) {
+        this.ws = null;
         this.scheduleReconnect();
       }
     });
