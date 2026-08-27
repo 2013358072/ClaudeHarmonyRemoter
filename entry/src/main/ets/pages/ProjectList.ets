@@ -19,6 +19,7 @@ import { ProjectInfo } from '../net/Protocol';
 import { SessionListParam } from './SessionList';
 import { formatTimestamp } from '../utils/Format';
 import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
+import { pasteboard } from '@kit.BasicServicesKit';
 
 /** 当前打开的弹层。名字不能叫 Sheet —— 会和 ArkUI 的 bindSheet 一族撞车 */
 class SheetKind {
@@ -27,6 +28,8 @@ class SheetKind {
   static readonly GROUP: string = 'group';
   static readonly NEW_GROUP: string = 'newGroup';
   static readonly GROUP_MENU: string = 'groupMenu';
+  /** 齿轮打开的项目设置面板 */
+  static readonly PROJECT_MENU: string = 'projectMenu';
 }
 
 @ComponentV2
@@ -36,8 +39,20 @@ export struct ProjectListView {
   @Local loading: boolean = true;
   @Local errorText: string = '';
 
-  /** 搜索关键词。非空时列表切换为拍平的结果视图 */
+  /** 输入框里的原始文本，每次按键都变 */
   @Local query: string = '';
+  /**
+   * 防抖后真正生效的关键词。
+   *
+   * 分成两个状态是必须的：过滤是 O(n) 的，而 build() 里会多处读取结果
+   * （标题计数、空态文案、列表本身）。直接用 query 意味着每按一个键
+   * 就要全量过滤好几遍 —— 项目一多就卡。
+   */
+  @Local activeQuery: string = '';
+  /** 缓存的搜索结果，只在 activeQuery 变化时重算一次 */
+  @Local results: ProjectInfo[] = [];
+  /** 防抖定时器句柄 */
+  private searchTimer: number = -1;
 
   // ---- 弹层状态 ----
   @Local sheet: string = SheetKind.NONE;
@@ -74,21 +89,62 @@ export struct ProjectListView {
   // -------------------------------------------------------------------------
 
   private searching(): boolean {
-    return this.query.trim().length > 0;
+    return this.activeQuery.length > 0;
   }
 
   /**
-   * 搜索结果。匹配显示名和真实路径 ——
-   * 用户可能记得的是项目名，也可能记得的是路径里的某一段。
+   * 输入变化时不立即过滤，等 180ms 没有新输入再算。
+   *
+   * 连续打字时每一键都全量过滤会明显掉帧，而人眼也看不清中间过程。
+   * 180ms 比常见的 300ms 短一些 —— 这里的过滤很轻，
+   * 拖太久反而显得迟钝。
    */
-  private searchResults(): ProjectInfo[] {
-    const q = this.query.trim().toLowerCase();
-    return this.projects.filter((p) => {
+  private onQueryChange(v: string): void {
+    this.query = v;
+    if (this.searchTimer !== -1) {
+      clearTimeout(this.searchTimer);
+    }
+    this.searchTimer = setTimeout(() => {
+      this.searchTimer = -1;
+      this.applyQuery(v.trim());
+    }, 180);
+  }
+
+  private applyQuery(q: string): void {
+    this.activeQuery = q;
+    if (q.length === 0) {
+      this.results = [];
+      return;
+    }
+    // 匹配显示名和真实路径 —— 用户可能记得项目名，
+    // 也可能记得的是路径里的某一段
+    const lower = q.toLowerCase();
+    this.results = this.projects.filter((p) => {
       const name = projectPrefs.displayName(p.id, p.name).toLowerCase();
-      if (name.indexOf(q) >= 0) {
+      if (name.indexOf(lower) >= 0) {
         return true;
       }
-      return p.path.toLowerCase().indexOf(q) >= 0;
+      return p.path.toLowerCase().indexOf(lower) >= 0;
+    });
+  }
+
+  private clearQuery(): void {
+    if (this.searchTimer !== -1) {
+      clearTimeout(this.searchTimer);
+      this.searchTimer = -1;
+    }
+    this.query = '';
+    this.activeQuery = '';
+    this.results = [];
+  }
+
+  /** 复制工作目录到剪贴板 */
+  private copyPath(path: string): void {
+    const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, path);
+    pasteboard.getSystemPasteboard().setData(data).then(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '工作目录已复制' });
+    }).catch(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
     });
   }
 
@@ -156,13 +212,13 @@ export struct ProjectListView {
         .fontColor(theme.palette.text)
         .placeholderColor(theme.palette.textTertiary)
         .backgroundColor(Color.Transparent)
-        .onChange((v: string) => { this.query = v; })
+        .onChange((v: string) => this.onQueryChange(v))
       if (this.query.length > 0) {
         Text('✕')
           .fontSize(theme.fs(FontSize.LABEL))
           .fontColor(theme.palette.textTertiary)
           .padding({ left: 4, right: 2 })
-          .onClick(() => { this.query = ''; })
+          .onClick(() => this.clearQuery())
       }
     }
     .width('100%')
@@ -335,40 +391,46 @@ export struct ProjectListView {
     })
   }
 
-  /** 左滑操作条 */
+  /**
+   * 左滑操作条：只有两个图标按钮。
+   *
+   * 从三个文字按钮改成图标，是因为文字按钮各要 64pt 宽，三个排下来
+   * 占掉半个屏幕，滑出来的一刻很有压迫感。图标按钮 52pt 见方，
+   * 两个加起来还不到原来的一半，含义也一眼就懂。
+   * 重命名和分组这类低频操作收进齿轮里，不占常驻位置。
+   */
   @Builder
   swipeActions(item: ProjectInfo) {
-    Row({ space: 6 }) {
-      this.swipeButton(
-        projectPrefs.isPinned(item.id) ? '取消置顶' : '置顶',
+    Row({ space: 8 }) {
+      this.swipeIcon(
+        projectPrefs.isPinned(item.id) ? $r('app.media.ic_pin_off') : $r('app.media.ic_pin'),
         theme.palette.accent,
         (): void => { projectPrefs.togglePin(item.id); }
       )
-      this.swipeButton('重命名', theme.palette.textSecondary, (): void => {
+      this.swipeIcon($r('app.media.ic_gear'), theme.palette.textSecondary, (): void => {
         this.targetId = item.id;
-        this.inputText = projectPrefs.displayName(item.id, item.name);
-        this.sheet = SheetKind.RENAME;
-      })
-      this.swipeButton('分组', theme.palette.textSecondary, (): void => {
-        this.targetId = item.id;
-        this.sheet = SheetKind.GROUP;
+        this.sheet = SheetKind.PROJECT_MENU;
       })
     }
     .height('100%')
-    .padding({ left: 6, right: 4 })
+    .padding({ left: 8, right: 4 })
+    .alignItems(VerticalAlign.Center)
   }
 
   @Builder
-  swipeButton(label: string, color: string, action: () => void) {
-    Text(label)
-      .fontSize(theme.fs(FontSize.TINY))
-      .fontColor(theme.palette.onAccent)
-      .textAlign(TextAlign.Center)
-      .width(64)
-      .height('86%')
-      .borderRadius(12)
-      .backgroundColor(color)
-      .onClick(() => { action(); })
+  swipeIcon(icon: Resource, bg: string, action: () => void) {
+    Row() {
+      Image(icon)
+        .width(21)
+        .height(21)
+        .fillColor(theme.palette.onAccent)
+    }
+    .width(52)
+    .height(52)
+    .borderRadius(14)
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor(bg)
+    .onClick(() => { action(); })
   }
 
   @Builder
@@ -455,6 +517,8 @@ export struct ProjectListView {
           this.textInputSheet('新建分组', '分组名称', '')
         } else if (this.sheet === SheetKind.GROUP_MENU) {
           this.groupMenuSheet()
+        } else if (this.sheet === SheetKind.PROJECT_MENU) {
+          this.projectMenuSheet()
         }
       }
       .width('100%')
@@ -641,6 +705,101 @@ export struct ProjectListView {
     .width('100%')
   }
 
+  /**
+   * 齿轮打开的项目设置面板。
+   *
+   * 工作目录整块可点即复制，不另设复制按钮 —— 一个只有单一动作的
+   * 区域，再挂一个按钮是多余的，还会挤占本就不宽的路径显示区。
+   */
+  @Builder
+  projectMenuSheet() {
+    Column({ space: 2 }) {
+      Text(this.targetName())
+        .fontSize(theme.fs(FontSize.HEADING))
+        .fontWeight(FontWeight.Medium)
+        .fontColor(theme.palette.text)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .padding({ bottom: 8 })
+
+      this.groupRow('重命名', false, (): void => {
+        this.inputText = this.targetName();
+        this.sheet = SheetKind.RENAME;
+      })
+      Divider().strokeWidth(0.5).color(theme.palette.border)
+
+      Row() {
+        Text('分组')
+          .fontSize(theme.fs(FontSize.BODY))
+          .fontColor(theme.palette.text)
+          .layoutWeight(1)
+        Text(this.targetGroupLabel())
+          .fontSize(theme.fs(FontSize.LABEL))
+          .fontColor(theme.palette.textTertiary)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .constraintSize({ maxWidth: '50%' })
+        Text('›')
+          .fontSize(theme.fs(16))
+          .fontColor(theme.palette.textTertiary)
+          .margin({ left: 6 })
+      }
+      .width('100%')
+      .padding({ top: 13, bottom: 13 })
+      .onClick(() => { this.sheet = SheetKind.GROUP; })
+
+      Divider().strokeWidth(0.5).color(theme.palette.border)
+
+      Column({ space: 6 }) {
+        Row({ space: 8 }) {
+          Text('工作目录')
+            .fontSize(theme.fs(FontSize.LABEL))
+            .fontColor(theme.palette.textSecondary)
+          Blank()
+          Text('点击复制')
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.accent)
+        }
+        .width('100%')
+
+        Text(this.targetPath())
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontFamily('monospace')
+          .fontColor(theme.palette.text)
+          .lineHeight(theme.fs(FontSize.TINY) * 1.55)
+          .width('100%')
+          .padding(12)
+          .borderRadius(10)
+          .backgroundColor(theme.palette.surfaceAlt)
+      }
+      .width('100%')
+      .padding({ top: 12 })
+      .onClick(() => { this.copyPath(this.targetPath()); })
+    }
+    .width('100%')
+  }
+
+  /** 当前操作目标的显示名 */
+  private targetName(): string {
+    const p = this.projects.find((x) => x.id === this.targetId);
+    return p === undefined ? '' : projectPrefs.displayName(p.id, p.name);
+  }
+
+  private targetPath(): string {
+    const p = this.projects.find((x) => x.id === this.targetId);
+    return p === undefined ? '' : p.path;
+  }
+
+  private targetGroupLabel(): string {
+    const gid = projectPrefs.groupIdOf(this.targetId);
+    if (gid === NO_GROUP) {
+      return '未分组';
+    }
+    const name = projectPrefs.groupName(gid);
+    return name.length > 0 ? name : '未分组';
+  }
+
   @Builder
   sheetOverlay() {
     if (this.sheet !== SheetKind.NONE) {
@@ -654,14 +813,14 @@ export struct ProjectListView {
 
   @Builder
   searchResultList() {
-    if (this.searchResults().length === 0) {
-      this.placeholder(`没有匹配「${this.query.trim()}」的项目`, false)
+    if (this.results.length === 0) {
+      this.placeholder(`没有匹配「${this.activeQuery}」的项目`, false)
     } else {
       List() {
         ListItem() {
-          this.sectionHeader('搜索结果', this.searchResults().length)
+          this.sectionHeader('搜索结果', this.results.length)
         }
-        ForEach(this.searchResults(), (item: ProjectInfo) => {
+        ForEach(this.results, (item: ProjectInfo) => {
           this.projectItem(item)
         }, (item: ProjectInfo) => `q_${item.id}`)
 

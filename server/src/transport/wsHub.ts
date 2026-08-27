@@ -131,6 +131,15 @@ export function attachWebSocket(server: Server, deps: WsDeps): () => void {
                 const content = typeof msg.text === 'string' ? msg.text.trim() : '';
                 if (!content) return;
 
+                // 延迟到第一条消息才真正拉起 claude 进程。
+                //
+                // 进程启动要加载整个 transcript，大会话上可能几十秒。
+                // 放在 attach 里做，用户一进聊天页就得干等，而他可能只是
+                // 想翻翻历史记录 —— 那种情况下这个进程纯属白起。
+                if (!conn.runner.isStarted()) {
+                    conn.runner.start();
+                }
+
                 // 先把用户消息回显出去。SDK 不会把我们推进去的用户消息
                 // 再吐回来，不回显的话手机上看不到自己刚发的内容。
                 const echo: WireEvent = {
@@ -207,7 +216,7 @@ export function attachWebSocket(server: Server, deps: WsDeps): () => void {
             onFatal: (message) => send(conn.socket, { type: 'fatal', message }),
         });
         conn.runner = runner;
-        runner.start();
+        // 刻意不在这里 start()：见 'send' 分支的说明
 
         // attached 的语义是"可以发消息了"，不是"拿到 session id 了"。
         //

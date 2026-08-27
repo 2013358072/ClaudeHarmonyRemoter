@@ -122,6 +122,11 @@ export class ClaudeRunner {
         }
     }
 
+    /** 是否已经拉起 claude 进程 */
+    isStarted(): boolean {
+        return this.started;
+    }
+
     /** 启动会话。立即返回，消息通过回调异步送出 */
     start(): void {
         if (this.started) return;

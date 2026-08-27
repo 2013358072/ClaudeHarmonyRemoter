@@ -14,7 +14,7 @@
  *    `agent-*` 这类子会话必须过滤掉，否则续接会失败。
  */
 
-import { readdirSync, statSync, createReadStream, openSync, readSync, closeSync } from 'node:fs';
+import { readdirSync, statSync, createReadStream } from 'node:fs';
 import { join, basename, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ProjectInfo, SessionInfo } from '../protocol/wire.js';
@@ -33,14 +33,26 @@ const FRESH_WINDOW_MS = 90 * 1000;
 const UUID_RE =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** 读首行时最多读这么多字节，足够覆盖一条记录 */
-const HEAD_BYTES = 128 * 1024;
+/**
+ * 扫描文件头时最多看这么多行。
+ *
+ * 不用"读固定字节数"那种写法：cwd 出现在第几行没有任何保证 ——
+ * 实测有的会话开头是一串不带 cwd 的 queue-operation 记录，
+ * 窗口定小了就会解析失败，把整个会话判成无效。
+ * 流式逐行读、拿到需要的字段立刻停，既没有窗口大小的赌注，
+ * 正常情况下也只读头一两行。
+ */
+const HEAD_MAX_LINES = 400;
+
+/** 扫描项目目录的并发上限 */
+const SCAN_CONCURRENCY = 12;
 
 interface SessionMeta {
     sessionId: string;
     cwd: string;
     gitBranch: string;
     title: string;
+    /** -1 表示还没数过。项目列表用不到这个值，所以默认不算 */
     messageCount: number;
     lastActiveAt: number;
 }
@@ -56,18 +68,6 @@ const metaCache = new Map<string, CacheEntry>();
 // ---------------------------------------------------------------------------
 // 单个会话文件的解析
 // ---------------------------------------------------------------------------
-
-/** 只读文件头部，够解析出前几条记录即可 */
-function readHead(path: string, bytes: number): string {
-    const fd = openSync(path, 'r');
-    try {
-        const buf = Buffer.allocUnsafe(bytes);
-        const read = readSync(fd, buf, 0, bytes, 0);
-        return buf.subarray(0, read).toString('utf8');
-    } finally {
-        closeSync(fd);
-    }
-}
 
 /** 流式数换行符，比整文件读入内存省得多 */
 async function countLines(path: string): Promise<number> {
@@ -115,6 +115,7 @@ function extractUserText(record: Record<string, unknown>): string | undefined {
 async function parseSession(
     filePath: string,
     sessionId: string,
+    needCount: boolean = false,
 ): Promise<SessionMeta | null> {
     let stat;
     try {
@@ -125,54 +126,56 @@ async function parseSession(
 
     const cached = metaCache.get(filePath);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        // 缓存里没数过行数、而这次又要用，就补算一次并回填
+        if (needCount && cached.meta.messageCount < 0) {
+            try {
+                cached.meta.messageCount = await countLines(filePath);
+            } catch {
+                cached.meta.messageCount = 0;
+            }
+        }
         return cached.meta;
-    }
-
-    let head: string;
-    try {
-        head = readHead(filePath, HEAD_BYTES);
-    } catch {
-        return null;
     }
 
     let cwd = '';
     let gitBranch = '';
     let title = '';
 
-    const lines = head.split('\n');
-    for (const line of lines) {
-        if (!line.trim()) continue;
-        let record: Record<string, unknown>;
-        try {
-            const parsed: unknown = JSON.parse(line);
-            if (typeof parsed !== 'object' || parsed === null) continue;
-            record = parsed as Record<string, unknown>;
-        } catch {
-            // 最后一行可能被 HEAD_BYTES 截断，属正常情况
-            continue;
-        }
-
-        if (!cwd && typeof record['cwd'] === 'string') cwd = record['cwd'];
-        if (!gitBranch && typeof record['gitBranch'] === 'string') {
-            gitBranch = record['gitBranch'];
-        }
-        if (!title) {
-            const text = extractUserText(record);
-            if (text && text.trim()) {
-                title = text.replace(/\s+/g, ' ').trim().slice(0, 60);
+    // 逐行流式扫描，拿齐 cwd 和标题就停 —— 绝大多数会话第一行就够了
+    try {
+        let seen = 0;
+        for await (const record of readJsonlRecords(filePath)) {
+            seen += 1;
+            if (!cwd && typeof record['cwd'] === 'string') cwd = record['cwd'];
+            if (!gitBranch && typeof record['gitBranch'] === 'string') {
+                gitBranch = record['gitBranch'];
             }
+            if (!title) {
+                const text = extractUserText(record);
+                if (text && text.trim()) {
+                    title = text.replace(/\s+/g, ' ').trim().slice(0, 60);
+                }
+            }
+            if ((cwd && title) || seen >= HEAD_MAX_LINES) break;
         }
-        if (cwd && title) break;
+    } catch {
+        // 文件可能正被写入或已被删除，交给调用方跳过
+        return null;
     }
 
     // 拿不到 cwd 说明这不是一个可用的会话文件
     if (!cwd) return null;
 
-    let messageCount = 0;
-    try {
-        messageCount = await countLines(filePath);
-    } catch {
-        messageCount = 0;
+    // 数行数要把整个文件流一遍。项目列表根本不显示这个值
+    // （它显示的是"几个会话"而不是"几条消息"），
+    // 所以默认跳过 —— 这一项此前让 /api/projects 白读了几十 MB。
+    let messageCount = -1;
+    if (needCount) {
+        try {
+            messageCount = await countLines(filePath);
+        } catch {
+            messageCount = 0;
+        }
     }
 
     const meta: SessionMeta = {
@@ -200,6 +203,7 @@ async function parseSession(
 async function scanProjectDir(
     projectsRoot: string,
     projectId: string,
+    needCount: boolean = false,
 ): Promise<SessionMeta[]> {
     const dir = join(projectsRoot, projectId);
     let files: string[];
@@ -209,16 +213,53 @@ async function scanProjectDir(
         return [];
     }
 
-    const out: SessionMeta[] = [];
+    const targets: string[] = [];
     for (const file of files) {
         if (!file.endsWith('.jsonl')) continue;
         const sessionId = file.slice(0, -'.jsonl'.length);
         // --resume 只吃 UUID，agent-* 等一律跳过
         if (!UUID_RE.test(sessionId)) continue;
-
-        const meta = await parseSession(join(dir, file), sessionId);
-        if (meta) out.push(meta);
+        targets.push(sessionId);
     }
+
+    // 同目录下的会话彼此独立，并行解析
+    const metas = await Promise.all(
+        targets.map((sessionId) =>
+            parseSession(join(dir, `${sessionId}.jsonl`), sessionId, needCount),
+        ),
+    );
+    return metas.filter((m): m is SessionMeta => m !== null);
+}
+
+/**
+ * 带并发上限地并行跑一批任务。
+ *
+ * 不用裸 Promise.all：110 个项目同时打开文件句柄会把 IO 打满，
+ * 反而比适度并发更慢，极端情况还可能触发 EMFILE。
+ */
+async function mapWithLimit<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+    const out: R[] = new Array(items.length);
+    let next = 0;
+    const workers: Promise<void>[] = [];
+    const n = Math.min(limit, items.length);
+
+    for (let i = 0; i < n; i += 1) {
+        workers.push(
+            (async () => {
+                for (;;) {
+                    const idx = next;
+                    next += 1;
+                    if (idx >= items.length) return;
+                    out[idx] = await fn(items[idx]!);
+                }
+            })(),
+        );
+    }
+    await Promise.all(workers);
     return out;
 }
 
@@ -264,9 +305,18 @@ export class SessionScanner {
             return [];
         }
 
+        // 并行扫描各项目目录。needCount=false：项目列表不显示消息条数
+        const scanned = await mapWithLimit(dirs, SCAN_CONCURRENCY, (projectId) =>
+            scanProjectDir(this.projectsRoot, projectId, false).then((sessions) => ({
+                projectId,
+                sessions,
+            })),
+        );
+
         const projects: ProjectInfo[] = [];
-        for (const projectId of dirs) {
-            const sessions = await scanProjectDir(this.projectsRoot, projectId);
+        for (const entry of scanned) {
+            const projectId = entry.projectId;
+            const sessions = entry.sessions;
             if (sessions.length === 0) continue;
 
             // 同一目录下所有会话的 cwd 应该一致，取第一个即可
@@ -295,7 +345,8 @@ export class SessionScanner {
 
     /** 列出某个项目下的会话，按最近活跃排序 */
     async listSessions(projectId: string): Promise<SessionInfo[] | null> {
-        const sessions = await scanProjectDir(this.projectsRoot, projectId);
+        // needCount=true：会话列表会显示「N 条」，这里确实要数
+        const sessions = await scanProjectDir(this.projectsRoot, projectId, true);
         if (sessions.length === 0) return null;
         if (!isAllowed(sessions[0]!.cwd, this.projectRoots)) return null;
 
@@ -323,7 +374,7 @@ export class SessionScanner {
      * 不要把"存在但不允许"和"不存在"区分开，避免泄漏服务器目录结构。
      */
     async resolveProjectPath(projectId: string): Promise<string | null> {
-        const sessions = await scanProjectDir(this.projectsRoot, projectId);
+        const sessions = await scanProjectDir(this.projectsRoot, projectId, false);
         if (sessions.length === 0) return null;
         const path = sessions[0]!.cwd;
         return isAllowed(path, this.projectRoots) ? path : null;
@@ -344,7 +395,7 @@ export class SessionScanner {
 
         for (const projectId of dirs) {
             const filePath = join(this.projectsRoot, projectId, `${sessionId}.jsonl`);
-            const meta = await parseSession(filePath, sessionId);
+            const meta = await parseSession(filePath, sessionId, false);
             if (meta && isAllowed(meta.cwd, this.projectRoots)) {
                 return filePath;
             }
@@ -357,19 +408,72 @@ export class SessionScanner {
 export async function* readJsonlRecords(
     filePath: string,
 ): AsyncGenerator<Record<string, unknown>> {
-    const rl = createInterface({
-        input: createReadStream(filePath),
-        crlfDelay: Infinity,
-    });
-    for await (const line of rl) {
-        if (!line.trim()) continue;
-        try {
-            const parsed: unknown = JSON.parse(line);
-            if (typeof parsed === 'object' && parsed !== null) {
-                yield parsed as Record<string, unknown>;
+    const stream = createReadStream(filePath);
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+        for await (const line of rl) {
+            if (!line.trim()) continue;
+            try {
+                const parsed: unknown = JSON.parse(line);
+                if (typeof parsed === 'object' && parsed !== null) {
+                    yield parsed as Record<string, unknown>;
+                }
+            } catch {
+                // 单行损坏不影响其余记录
             }
-        } catch {
-            // 单行损坏不影响其余记录
         }
+    } finally {
+        // 调用方 break 提前退出时，生成器的 return() 会走到这里。
+        // 没有这段清理，每次提前中断都会漏掉一个文件句柄和 readline 实例 ——
+        // 对持续增长、每次都缓存未命中的大文件尤其致命。
+        rl.close();
+        stream.destroy();
+    }
+}
+
+/**
+ * 只读文件尾部的若干字节并逐行解析。
+ *
+ * 历史消息接口只要最后 N 条，从头读完再切片是纯浪费 ——
+ * 实测最大的会话文件有 6.8 MB，而 200 条消息通常只占几百 KB。
+ *
+ * 第一行大概率被截断，直接丢弃。文件比 tailBytes 小就整篇读。
+ */
+export async function* readJsonlTail(
+    filePath: string,
+    tailBytes: number,
+): AsyncGenerator<Record<string, unknown>> {
+    let size = 0;
+    try {
+        size = statSync(filePath).size;
+    } catch {
+        return;
+    }
+
+    const start = size > tailBytes ? size - tailBytes : 0;
+    const stream = createReadStream(filePath, { start });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+    try {
+        let first = true;
+        for await (const line of rl) {
+            // 从中间切进去的第一行必然不完整
+            if (first) {
+                first = false;
+                if (start > 0) continue;
+            }
+            if (!line.trim()) continue;
+            try {
+                const parsed: unknown = JSON.parse(line);
+                if (typeof parsed === 'object' && parsed !== null) {
+                    yield parsed as Record<string, unknown>;
+                }
+            } catch {
+                // 单行损坏不影响其余记录
+            }
+        }
+    } finally {
+        rl.close();
+        stream.destroy();
     }
 }

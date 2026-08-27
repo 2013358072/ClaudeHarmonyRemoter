@@ -6,9 +6,18 @@
  * normalize()，不另写一套解析逻辑 —— 两边的渲染结果也因此保证一致。
  */
 
-import { readJsonlRecords } from './scanner.js';
+import { readJsonlTail } from './scanner.js';
 import { normalize } from '../protocol/normalize.js';
 import type { WireEvent } from '../protocol/wire.js';
+
+/**
+ * 读取尾部多少字节。
+ *
+ * 按实测语料，200 条消息大约几百 KB，2 MB 有充分余量；
+ * 而最大的会话文件有 6.8 MB，从头读完再切片是三倍以上的浪费。
+ * 万一尾部不足 limit 条，少显示几条历史远比让用户等着强。
+ */
+const TAIL_BYTES = 2 * 1024 * 1024;
 
 export interface HistoryOptions {
     /** 最多返回多少条事件，取最新的 */
@@ -27,7 +36,7 @@ export async function loadHistory(
 ): Promise<WireEvent[]> {
     const events: WireEvent[] = [];
 
-    for await (const record of readJsonlRecords(filePath)) {
+    for await (const record of readJsonlTail(filePath, TAIL_BYTES)) {
         if (record['isSidechain'] === true) continue;
 
         const { events: produced } = normalize(record);
