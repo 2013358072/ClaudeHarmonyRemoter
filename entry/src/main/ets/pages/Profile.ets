@@ -230,7 +230,7 @@ export struct ProfileView {
             .border({ width: 1, color: theme.palette.border })
             .onClick(() => { this.onSignOut(); })
 
-          Text('CC-Remoter v0.1.1')
+          Text('CC-Remoter v0.1.2')
             .fontSize(theme.fs(FontSize.TINY))
             .fontColor(theme.palette.textTertiary)
             .width('100%')
