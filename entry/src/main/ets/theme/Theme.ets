@@ -198,6 +198,14 @@ export class ThemeStore {
 export const theme: ThemeStore = new ThemeStore();
 
 /**
+ * 「正在运行」的绿色。
+ *
+ * 不进 Palette —— 这是语义色而非主题色，三套配色下都该是同一个绿，
+ * 换主题时它不该跟着变。这个值在浅色和深色底上都有足够对比度。
+ */
+export const RUNNING_GREEN: string = '#3FB950';
+
+/**
  * 基准字号。
  *
  * ASSISTANT 是模型回复的正文，刻意比用户消息小一档：

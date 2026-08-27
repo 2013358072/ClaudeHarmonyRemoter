@@ -3,32 +3,67 @@
  */
 
 const MINUTE = 60 * 1000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
+/** 3 分钟以内算「刚刚」 */
+const JUST_NOW = 3 * MINUTE;
 
-/** 把时间戳转成「刚刚 / 5 分钟前 / 3 小时前 / 2 天前 / 具体日期」 */
-export function formatRelativeTime(ts: number): string {
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/**
+ * 时间戳格式化。
+ *
+ * 显示**实际时间**而不是「几小时前」—— 相对时间读起来要在脑子里做一次
+ * 减法才知道具体是什么时候，而用户看会话列表时通常想知道的是
+ * "这是今天下午那次还是昨天那次"。
+ *
+ * 只有 3 分钟以内例外，显示「刚刚」：这个区间说时:分反而累赘，
+ * 且这时候用户关心的确实是"就在不久前"这个模糊概念。
+ *
+ * 规则：
+ *   3 分钟内   刚刚
+ *   今天       14:32
+ *   昨天       昨天 14:32
+ *   今年       8月26日 14:32
+ *   更早       2025/8/26
+ */
+export function formatTimestamp(ts: number): string {
   if (ts <= 0) {
     return '';
   }
-  const diff = Date.now() - ts;
 
-  if (diff < MINUTE) {
+  const now = new Date();
+  const d = new Date(ts);
+  const diff = now.getTime() - ts;
+
+  if (diff >= 0 && diff < JUST_NOW) {
     return '刚刚';
   }
-  if (diff < HOUR) {
-    return `${Math.floor(diff / MINUTE)} 分钟前`;
-  }
-  if (diff < DAY) {
-    return `${Math.floor(diff / HOUR)} 小时前`;
-  }
-  if (diff < 7 * DAY) {
-    return `${Math.floor(diff / DAY)} 天前`;
+
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+
+  // 按日历日比较，不用 24 小时窗口 —— 凌晨 1 点看昨晚 11 点的会话，
+  // 说「昨天 23:00」比说「2 小时前」更符合直觉
+  const sameDay = d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
+  if (sameDay) {
+    return hm;
   }
 
-  const d = new Date(ts);
-  const month = d.getMonth() + 1;
-  return `${month}月${d.getDate()}日`;
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const isYesterday = d.getFullYear() === yesterday.getFullYear()
+    && d.getMonth() === yesterday.getMonth()
+    && d.getDate() === yesterday.getDate();
+  if (isYesterday) {
+    return `昨天 ${hm}`;
+  }
+
+  if (d.getFullYear() === now.getFullYear()) {
+    return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+  }
+
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 /** 耗时：小于 1 秒显示毫秒，否则显示秒 */

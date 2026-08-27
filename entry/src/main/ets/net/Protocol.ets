@@ -105,6 +105,8 @@ export interface ProjectInfo {
   name: string;
   sessionCount: number;
   lastActiveAt: number;
+  /** 名下是否有正在运行的会话。服务端已保证运行中的排在前面 */
+  running: boolean;
 }
 
 export interface SessionInfo {
@@ -113,6 +115,8 @@ export interface SessionInfo {
   gitBranch: string;
   messageCount: number;
   lastActiveAt: number;
+  /** 是否正在运行。服务端已保证运行中的排在前面 */
+  running: boolean;
 }
 
 export interface PairResponse {

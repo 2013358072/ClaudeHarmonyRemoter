@@ -154,6 +154,8 @@ export interface ProjectInfo {
     name: string;
     sessionCount: number;
     lastActiveAt: number;
+    /** 名下是否有正在运行的会话 */
+    running: boolean;
 }
 
 export interface SessionInfo {
@@ -163,6 +165,15 @@ export interface SessionInfo {
     gitBranch: string;
     messageCount: number;
     lastActiveAt: number;
+    /**
+     * 是否正在运行。
+     *
+     * 两个来源取或：本服务持有 runner（精确），
+     * 或 transcript 在最近 90 秒内被写入过（启发式，覆盖
+     * 用户直接在服务器终端跑 claude 的情况）。
+     * 详见 claude/activeSessions.ts。
+     */
+    running: boolean;
 }
 
 export interface PairResponse {

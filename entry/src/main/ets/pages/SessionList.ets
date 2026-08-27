@@ -8,8 +8,8 @@
 import { apiClient, ApiException } from '../net/ApiClient';
 import { SessionInfo } from '../net/Protocol';
 import { ChatParam } from './Chat';
-import { formatRelativeTime } from '../utils/Format';
-import { theme, FontSize } from '../theme/Theme';
+import { formatTimestamp } from '../utils/Format';
+import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 
 /** 路由参数 */
 export interface SessionListParam {
@@ -101,45 +101,70 @@ export struct SessionListView {
 
   @Builder
   sessionCard(item: SessionInfo) {
-    Column({ space: 7 }) {
-      Text(item.title)
-        .fontSize(theme.fs(FontSize.BODY))
-        .fontColor(theme.palette.text)
-        .lineHeight(theme.fs(FontSize.BODY) * 1.45)
-        .maxLines(2)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .width('100%')
+    // Stack 是为了把运行绿点压在卡片左上角
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column({ space: 7 }) {
+        Text(item.title)
+          .fontSize(theme.fs(FontSize.BODY))
+          .fontColor(theme.palette.text)
+          .lineHeight(theme.fs(FontSize.BODY) * 1.45)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
 
-      Row({ space: 10 }) {
-        Text(`${item.messageCount} 条`)
-          .fontSize(theme.fs(FontSize.TINY))
-          .fontColor(theme.palette.textTertiary)
+        Row({ space: 10 }) {
+          if (item.running) {
+            Text('运行中')
+              .fontSize(theme.fs(FontSize.TINY))
+              .fontColor(RUNNING_GREEN)
+              .fontWeight(FontWeight.Medium)
+          }
 
-        if (item.gitBranch.length > 0) {
-          Text(item.gitBranch)
+          Text(`${item.messageCount} 条`)
             .fontSize(theme.fs(FontSize.TINY))
-            .fontColor(theme.palette.textSecondary)
-            .padding({ left: 7, right: 7, top: 2, bottom: 2 })
-            .borderRadius(5)
-            .backgroundColor(theme.palette.surfaceAlt)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .constraintSize({ maxWidth: 120 })
-        }
+            .fontColor(theme.palette.textTertiary)
 
-        Blank()
-        Text(formatRelativeTime(item.lastActiveAt))
-          .fontSize(theme.fs(FontSize.TINY))
-          .fontColor(theme.palette.textTertiary)
+          if (item.gitBranch.length > 0) {
+            Text(item.gitBranch)
+              .fontSize(theme.fs(FontSize.TINY))
+              .fontColor(theme.palette.textSecondary)
+              .padding({ left: 7, right: 7, top: 2, bottom: 2 })
+              .borderRadius(5)
+              .backgroundColor(theme.palette.surfaceAlt)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .constraintSize({ maxWidth: 110 })
+          }
+
+          Blank()
+          Text(formatTimestamp(item.lastActiveAt))
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.textTertiary)
+        }
+        .width('100%')
       }
       .width('100%')
+      .padding(15)
+      .alignItems(HorizontalAlign.Start)
+
+      if (item.running) {
+        // 外圈用卡片底色描边，让绿点像贴在角上的徽标而不是一个色块
+        Row()
+          .width(9)
+          .height(9)
+          .borderRadius(5)
+          .backgroundColor(RUNNING_GREEN)
+          .border({ width: 2, color: theme.palette.surface })
+          .margin({ left: 7, top: 7 })
+      }
     }
     .width('100%')
-    .padding(15)
     .borderRadius(16)
     .backgroundColor(theme.palette.surface)
-    .border({ width: 1, color: theme.palette.border })
-    .alignItems(HorizontalAlign.Start)
+    .border({
+      width: 1,
+      color: item.running ? RUNNING_GREEN : theme.palette.border
+    })
   }
 
   build() {

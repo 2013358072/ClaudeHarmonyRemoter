@@ -1,11 +1,14 @@
 /**
  * 项目列表：服务器上有 Claude 会话记录的项目。
  *
- * 三层组织：置顶 → 各分组（可折叠抽屉）→ 未分组。
- * 分组、置顶、重命名都是本地偏好，见 store/ProjectPrefs.ets。
+ * 常态下四层组织：运行中 → 置顶 → 各分组（可折叠抽屉）→ 未分组。
+ * 优先级从高到低，一个项目只出现在最高的那一层，不重复。
  *
- * 卡片左滑出操作条（置顶 / 重命名 / 分组）—— 手机上这是比长按菜单
- * 更符合直觉的入口，也不会误触。
+ * 搜索时**拍平成单一结果列表**，不保留分组结构 ——
+ * 搜索的意图是"快速找到那一个"，分组套结果反而增加扫读成本。
+ *
+ * 分组、置顶、重命名都是本地偏好，见 store/ProjectPrefs.ets。
+ * 「正在运行」由服务端判定，见 server/src/claude/activeSessions.ts。
  */
 
 import { apiClient, ApiException } from '../net/ApiClient';
@@ -14,10 +17,10 @@ import { tokenStore } from '../store/TokenStore';
 import { projectPrefs, ProjectGroup, NO_GROUP } from '../store/ProjectPrefs';
 import { ProjectInfo } from '../net/Protocol';
 import { SessionListParam } from './SessionList';
-import { formatRelativeTime } from '../utils/Format';
-import { theme, FontSize } from '../theme/Theme';
+import { formatTimestamp } from '../utils/Format';
+import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 
-/** 当前打开的弹层 */
+/** 当前打开的弹层。名字不能叫 Sheet —— 会和 ArkUI 的 bindSheet 一族撞车 */
 class SheetKind {
   static readonly NONE: string = '';
   static readonly RENAME: string = 'rename';
@@ -32,6 +35,9 @@ export struct ProjectListView {
   @Local projects: ProjectInfo[] = [];
   @Local loading: boolean = true;
   @Local errorText: string = '';
+
+  /** 搜索关键词。非空时列表切换为拍平的结果视图 */
+  @Local query: string = '';
 
   // ---- 弹层状态 ----
   @Local sheet: string = SheetKind.NONE;
@@ -67,20 +73,45 @@ export struct ProjectListView {
   // 分区计算
   // -------------------------------------------------------------------------
 
-  private pinnedItems(): ProjectInfo[] {
-    return this.projects.filter((p) => projectPrefs.isPinned(p.id));
+  private searching(): boolean {
+    return this.query.trim().length > 0;
   }
 
-  /** 某个分组下的项目。置顶的已经单独成区，这里排除掉避免重复出现 */
+  /**
+   * 搜索结果。匹配显示名和真实路径 ——
+   * 用户可能记得的是项目名，也可能记得的是路径里的某一段。
+   */
+  private searchResults(): ProjectInfo[] {
+    const q = this.query.trim().toLowerCase();
+    return this.projects.filter((p) => {
+      const name = projectPrefs.displayName(p.id, p.name).toLowerCase();
+      if (name.indexOf(q) >= 0) {
+        return true;
+      }
+      return p.path.toLowerCase().indexOf(q) >= 0;
+    });
+  }
+
+  private runningItems(): ProjectInfo[] {
+    return this.projects.filter((p) => p.running);
+  }
+
+  /** 置顶区排除运行中的 —— 后者已单独成区，不重复出现 */
+  private pinnedItems(): ProjectInfo[] {
+    return this.projects.filter((p) => !p.running && projectPrefs.isPinned(p.id));
+  }
+
   private itemsInGroup(groupId: string): ProjectInfo[] {
     return this.projects.filter((p) =>
-      !projectPrefs.isPinned(p.id) && projectPrefs.groupIdOf(p.id) === groupId
+      !p.running
+        && !projectPrefs.isPinned(p.id)
+        && projectPrefs.groupIdOf(p.id) === groupId
     );
   }
 
   private ungroupedItems(): ProjectInfo[] {
     return this.projects.filter((p) => {
-      if (projectPrefs.isPinned(p.id)) {
+      if (p.running || projectPrefs.isPinned(p.id)) {
         return false;
       }
       const gid = projectPrefs.groupIdOf(p.id);
@@ -112,12 +143,64 @@ export struct ProjectListView {
   // -------------------------------------------------------------------------
 
   @Builder
+  searchBar() {
+    Row({ space: 8 }) {
+      Text('🔍')
+        .fontSize(theme.fs(FontSize.LABEL))
+        .opacity(0.5)
+      TextInput({ placeholder: '搜索项目名称或路径', text: this.query })
+        .layoutWeight(1)
+        .height(38)
+        .padding({ left: 0, right: 0 })
+        .fontSize(theme.fs(FontSize.LABEL))
+        .fontColor(theme.palette.text)
+        .placeholderColor(theme.palette.textTertiary)
+        .backgroundColor(Color.Transparent)
+        .onChange((v: string) => { this.query = v; })
+      if (this.query.length > 0) {
+        Text('✕')
+          .fontSize(theme.fs(FontSize.LABEL))
+          .fontColor(theme.palette.textTertiary)
+          .padding({ left: 4, right: 2 })
+          .onClick(() => { this.query = ''; })
+      }
+    }
+    .width('100%')
+    .padding({ left: 14, right: 12 })
+    .borderRadius(12)
+    .backgroundColor(theme.palette.surfaceAlt)
+  }
+
+  @Builder
   sectionHeader(title: string, count: number) {
     Row({ space: 8 }) {
       Text(title)
         .fontSize(theme.fs(FontSize.TINY))
         .fontWeight(FontWeight.Medium)
         .fontColor(theme.palette.textSecondary)
+      Text(`${count}`)
+        .fontSize(theme.fs(FontSize.TINY))
+        .fontColor(theme.palette.textTertiary)
+      Blank()
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 14, bottom: 8 })
+    .backgroundColor(theme.palette.bg)
+  }
+
+  /** 运行中区标题，带绿点，和普通分区区分开 */
+  @Builder
+  runningHeader(count: number) {
+    Row({ space: 7 }) {
+      Row()
+        .width(7)
+        .height(7)
+        .borderRadius(4)
+        .backgroundColor(RUNNING_GREEN)
+      Text('正在运行')
+        .fontSize(theme.fs(FontSize.TINY))
+        .fontWeight(FontWeight.Medium)
+        .fontColor(RUNNING_GREEN)
       Text(`${count}`)
         .fontSize(theme.fs(FontSize.TINY))
         .fontColor(theme.palette.textTertiary)
@@ -179,59 +262,77 @@ export struct ProjectListView {
 
   @Builder
   projectCard(item: ProjectInfo) {
-    Row({ space: 12 }) {
-      // 首字母方块，给列表一个视觉锚点
-      Text(projectPrefs.displayName(item.id, item.name).substring(0, 1).toUpperCase())
-        .fontSize(theme.fs(FontSize.HEADING))
-        .fontWeight(FontWeight.Medium)
-        .fontColor(theme.palette.accent)
-        .width(42)
-        .height(42)
-        .textAlign(TextAlign.Center)
-        .borderRadius(12)
-        .backgroundColor(theme.palette.surfaceAlt)
+    // Stack 是为了把运行绿点压在卡片左上角
+    Stack({ alignContent: Alignment.TopStart }) {
+      Row({ space: 12 }) {
+        // 首字母方块，给列表一个视觉锚点
+        Text(projectPrefs.displayName(item.id, item.name).substring(0, 1).toUpperCase())
+          .fontSize(theme.fs(FontSize.HEADING))
+          .fontWeight(FontWeight.Medium)
+          .fontColor(item.running ? RUNNING_GREEN : theme.palette.accent)
+          .width(42)
+          .height(42)
+          .textAlign(TextAlign.Center)
+          .borderRadius(12)
+          .backgroundColor(theme.palette.surfaceAlt)
 
-      Column({ space: 3 }) {
-        Row({ space: 6 }) {
-          if (projectPrefs.isPinned(item.id)) {
-            Text('▲')
-              .fontSize(theme.fs(9))
-              .fontColor(theme.palette.accent)
+        Column({ space: 3 }) {
+          Row({ space: 6 }) {
+            if (projectPrefs.isPinned(item.id)) {
+              Text('▲')
+                .fontSize(theme.fs(9))
+                .fontColor(theme.palette.accent)
+            }
+            Text(projectPrefs.displayName(item.id, item.name))
+              .fontSize(theme.fs(FontSize.BODY))
+              .fontWeight(FontWeight.Medium)
+              .fontColor(theme.palette.text)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(formatTimestamp(item.lastActiveAt))
+              .fontSize(theme.fs(FontSize.TINY))
+              .fontColor(theme.palette.textTertiary)
           }
-          Text(projectPrefs.displayName(item.id, item.name))
-            .fontSize(theme.fs(FontSize.BODY))
-            .fontWeight(FontWeight.Medium)
-            .fontColor(theme.palette.text)
-            .layoutWeight(1)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-          Text(formatRelativeTime(item.lastActiveAt))
+          .width('100%')
+
+          Text(item.path)
             .fontSize(theme.fs(FontSize.TINY))
             .fontColor(theme.palette.textTertiary)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .width('100%')
+
+          Text(`${item.sessionCount} 个会话`)
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.textSecondary)
+            .width('100%')
         }
-        .width('100%')
-
-        Text(item.path)
-          .fontSize(theme.fs(FontSize.TINY))
-          .fontColor(theme.palette.textTertiary)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .width('100%')
-
-        Text(`${item.sessionCount} 个会话`)
-          .fontSize(theme.fs(FontSize.TINY))
-          .fontColor(theme.palette.textSecondary)
-          .width('100%')
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
       }
-      .layoutWeight(1)
-      .alignItems(HorizontalAlign.Start)
+      .width('100%')
+      .padding(14)
+      .alignItems(VerticalAlign.Center)
+
+      if (item.running) {
+        // 外圈用卡片底色描边，让绿点像贴在角上的徽标而不是一个色块
+        Row()
+          .width(9)
+          .height(9)
+          .borderRadius(5)
+          .backgroundColor(RUNNING_GREEN)
+          .border({ width: 2, color: theme.palette.surface })
+          .margin({ left: 7, top: 7 })
+      }
     }
     .width('100%')
-    .padding(14)
     .borderRadius(16)
     .backgroundColor(theme.palette.surface)
-    .border({ width: 1, color: theme.palette.border })
-    .alignItems(VerticalAlign.Center)
+    .border({
+      width: 1,
+      color: item.running ? RUNNING_GREEN : theme.palette.border
+    })
   }
 
   /** 左滑操作条 */
@@ -287,23 +388,25 @@ export struct ProjectListView {
   }
 
   @Builder
-  placeholder(text: string) {
+  placeholder(text: string, showRetry: boolean) {
     Column({ space: 14 }) {
       Text(text)
         .fontSize(theme.fs(FontSize.LABEL))
         .fontColor(theme.palette.textSecondary)
         .textAlign(TextAlign.Center)
-      Button('重试')
-        .height(40)
-        .fontSize(theme.fs(FontSize.LABEL))
-        .fontColor(theme.palette.onAccent)
-        .backgroundColor(theme.palette.accent)
-        .borderRadius(20)
-        .padding({ left: 26, right: 26 })
-        .onClick(() => {
-          this.loading = true;
-          this.load();
-        })
+      if (showRetry) {
+        Button('重试')
+          .height(40)
+          .fontSize(theme.fs(FontSize.LABEL))
+          .fontColor(theme.palette.onAccent)
+          .backgroundColor(theme.palette.accent)
+          .borderRadius(20)
+          .padding({ left: 26, right: 26 })
+          .onClick(() => {
+            this.loading = true;
+            this.load();
+          })
+      }
     }
     .layoutWeight(1)
     .width('100%')
@@ -545,6 +648,91 @@ export struct ProjectListView {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 两种列表形态
+  // -------------------------------------------------------------------------
+
+  @Builder
+  searchResultList() {
+    if (this.searchResults().length === 0) {
+      this.placeholder(`没有匹配「${this.query.trim()}」的项目`, false)
+    } else {
+      List() {
+        ListItem() {
+          this.sectionHeader('搜索结果', this.searchResults().length)
+        }
+        ForEach(this.searchResults(), (item: ProjectInfo) => {
+          this.projectItem(item)
+        }, (item: ProjectInfo) => `q_${item.id}`)
+
+        ListItem() {
+          Row().height(8)
+        }
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .scrollBar(BarState.Off)
+    }
+  }
+
+  @Builder
+  groupedList() {
+    List() {
+      // ---- 运行中 ----
+      if (this.runningItems().length > 0) {
+        ListItem() {
+          this.runningHeader(this.runningItems().length)
+        }
+        ForEach(this.runningItems(), (item: ProjectInfo) => {
+          this.projectItem(item)
+        }, (item: ProjectInfo) => `run_${item.id}`)
+      }
+
+      // ---- 置顶 ----
+      if (this.pinnedItems().length > 0) {
+        ListItem() {
+          this.sectionHeader('置顶', this.pinnedItems().length)
+        }
+        ForEach(this.pinnedItems(), (item: ProjectInfo) => {
+          this.projectItem(item)
+        }, (item: ProjectInfo) => `pin_${item.id}`)
+      }
+
+      // ---- 分组抽屉 ----
+      ForEach(projectPrefs.groups, (g: ProjectGroup) => {
+        ListItem() {
+          this.groupHeader(g, this.itemsInGroup(g.id).length)
+        }
+        if (!g.collapsed) {
+          ForEach(this.itemsInGroup(g.id), (item: ProjectInfo) => {
+            this.projectItem(item)
+          }, (item: ProjectInfo) => `${g.id}_${item.id}`)
+        }
+      }, (g: ProjectGroup) => g.id)
+
+      // ---- 未分组 ----
+      if (this.ungroupedItems().length > 0) {
+        if (projectPrefs.groups.length > 0
+          || this.pinnedItems().length > 0
+          || this.runningItems().length > 0) {
+          ListItem() {
+            this.sectionHeader('未分组', this.ungroupedItems().length)
+          }
+        }
+        ForEach(this.ungroupedItems(), (item: ProjectInfo) => {
+          this.projectItem(item)
+        }, (item: ProjectInfo) => `ung_${item.id}`)
+      }
+
+      ListItem() {
+        Row().height(8)
+      }
+    }
+    .layoutWeight(1)
+    .width('100%')
+    .scrollBar(BarState.Off)
+  }
+
   build() {
     Stack() {
       Column() {
@@ -577,6 +765,15 @@ export struct ProjectListView {
         .padding({ left: 20, right: 16, top: 14, bottom: 10 })
         .alignItems(VerticalAlign.Center)
 
+        // ---- 搜索 ----
+        if (!this.loading && this.errorText.length === 0 && this.projects.length > 0) {
+          Column() {
+            this.searchBar()
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, bottom: 6 })
+        }
+
         if (this.loading) {
           Column() {
             LoadingProgress().width(36).height(36).color(theme.palette.accent)
@@ -585,52 +782,13 @@ export struct ProjectListView {
           .width('100%')
           .justifyContent(FlexAlign.Center)
         } else if (this.errorText.length > 0) {
-          this.placeholder(this.errorText)
+          this.placeholder(this.errorText, true)
         } else if (this.projects.length === 0) {
-          this.placeholder('服务器上还没有 Claude 会话记录')
+          this.placeholder('服务器上还没有 Claude 会话记录', true)
+        } else if (this.searching()) {
+          this.searchResultList()
         } else {
-          List() {
-            // ---- 置顶 ----
-            if (this.pinnedItems().length > 0) {
-              ListItem() {
-                this.sectionHeader('置顶', this.pinnedItems().length)
-              }
-              ForEach(this.pinnedItems(), (item: ProjectInfo) => {
-                this.projectItem(item)
-              }, (item: ProjectInfo) => `pin_${item.id}`)
-            }
-
-            // ---- 分组抽屉 ----
-            ForEach(projectPrefs.groups, (g: ProjectGroup) => {
-              ListItem() {
-                this.groupHeader(g, this.itemsInGroup(g.id).length)
-              }
-              if (!g.collapsed) {
-                ForEach(this.itemsInGroup(g.id), (item: ProjectInfo) => {
-                  this.projectItem(item)
-                }, (item: ProjectInfo) => `${g.id}_${item.id}`)
-              }
-            }, (g: ProjectGroup) => g.id)
-
-            // ---- 未分组 ----
-            if (this.ungroupedItems().length > 0) {
-              if (projectPrefs.groups.length > 0 || this.pinnedItems().length > 0) {
-                ListItem() {
-                  this.sectionHeader('未分组', this.ungroupedItems().length)
-                }
-              }
-              ForEach(this.ungroupedItems(), (item: ProjectInfo) => {
-                this.projectItem(item)
-              }, (item: ProjectInfo) => `ung_${item.id}`)
-            }
-
-            ListItem() {
-              Row().height(8)
-            }
-          }
-          .layoutWeight(1)
-          .width('100%')
-          .scrollBar(BarState.Off)
+          this.groupedList()
         }
       }
       .width('100%')

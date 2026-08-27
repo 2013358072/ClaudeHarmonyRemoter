@@ -8,6 +8,7 @@
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { PushableAsyncIterable } from './pushable.js';
+import { markActive, unmarkActive } from './activeSessions.js';
 import { normalize, errorEvent, summarizeTool } from '../protocol/normalize.js';
 import type {
     WireEvent,
@@ -114,6 +115,11 @@ export class ClaudeRunner {
     constructor(options: RunnerOptions) {
         this.opts = options;
         this.sessionId = options.resumeSessionId;
+        // 续接已有会话时 id 一开始就知道，立刻登记为运行中；
+        // 新建会话要等 SDK 回传 id，见 run() 里的 onSessionId 分支
+        if (this.sessionId) {
+            markActive(this.sessionId);
+        }
     }
 
     /** 启动会话。立即返回，消息通过回调异步送出 */
@@ -163,7 +169,12 @@ export class ClaudeRunner {
 
                 // 新建会话时，真实 id 是在 system/init 消息里才出现的
                 if (sessionId && sessionId !== this.sessionId) {
+                    // 换 id 时要把旧的注销掉，否则运行中列表会留下幽灵条目
+                    if (this.sessionId) {
+                        unmarkActive(this.sessionId);
+                    }
                     this.sessionId = sessionId;
+                    markActive(sessionId);
                     opts.onSessionId(sessionId);
                 }
 
@@ -352,6 +363,9 @@ export class ClaudeRunner {
     stop(): void {
         if (this.stopped) return;
         this.stopped = true;
+        if (this.sessionId) {
+            unmarkActive(this.sessionId);
+        }
         // 顺序要紧：先把待决权限全部拒掉再 abort。
         // 否则 SDK 那边还挂着未兑现的 Promise，abort 不一定能把它唤醒。
         this.denyAllPending();

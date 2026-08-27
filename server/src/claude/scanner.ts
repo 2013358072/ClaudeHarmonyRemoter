@@ -18,6 +18,16 @@ import { readdirSync, statSync, createReadStream, openSync, readSync, closeSync 
 import { join, basename, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ProjectInfo, SessionInfo } from '../protocol/wire.js';
+import { isActive } from './activeSessions.js';
+
+/**
+ * transcript 多久没更新就不算"正在运行"。
+ *
+ * Claude Code 干活时会持续写 transcript，所以文件新鲜度是个不错的
+ * 活跃信号。90 秒是权衡：太短会让思考中的长任务被误判为已停，
+ * 太长则刚结束的会话还挂着绿点。
+ */
+const FRESH_WINDOW_MS = 90 * 1000;
 
 /** UUID v4 形态，与 Claude Code 对 --resume 的要求一致 */
 const UUID_RE =
@@ -212,6 +222,19 @@ async function scanProjectDir(
     return out;
 }
 
+/**
+ * 会话是否正在运行。
+ *
+ * 注意这个判断**不能进 metaCache** —— 它和当前时间相关，
+ * 缓存住会让绿点永远停在第一次扫描时的状态。
+ */
+function isRunning(sessionId: string, lastActiveAt: number): boolean {
+    if (isActive(sessionId)) {
+        return true;
+    }
+    return Date.now() - lastActiveAt < FRESH_WINDOW_MS;
+}
+
 /** 判断某个路径是否落在白名单之内 */
 function isAllowed(path: string, roots: readonly string[]): boolean {
     if (roots.length === 0) return true; // 未配置白名单 = 不限制
@@ -256,10 +279,17 @@ export class SessionScanner {
                 name: basename(path) || path,
                 sessionCount: sessions.length,
                 lastActiveAt: Math.max(...sessions.map((s) => s.lastActiveAt)),
+                running: sessions.some((s) => isRunning(s.sessionId, s.lastActiveAt)),
             });
         }
 
-        projects.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+        // 运行中的排最前，其余按最近活跃
+        projects.sort((a, b) => {
+            if (a.running !== b.running) {
+                return a.running ? -1 : 1;
+            }
+            return b.lastActiveAt - a.lastActiveAt;
+        });
         return projects;
     }
 
@@ -270,14 +300,21 @@ export class SessionScanner {
         if (!isAllowed(sessions[0]!.cwd, this.projectRoots)) return null;
 
         return sessions
-            .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
-            .map((s) => ({
+            .map((s): SessionInfo => ({
                 sessionId: s.sessionId,
                 title: s.title,
                 gitBranch: s.gitBranch,
                 messageCount: s.messageCount,
                 lastActiveAt: s.lastActiveAt,
-            }));
+                running: isRunning(s.sessionId, s.lastActiveAt),
+            }))
+            // 运行中的排最前，其余按最近活跃
+            .sort((a, b) => {
+                if (a.running !== b.running) {
+                    return a.running ? -1 : 1;
+                }
+                return b.lastActiveAt - a.lastActiveAt;
+            });
     }
 
     /**
