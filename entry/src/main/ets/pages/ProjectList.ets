@@ -92,6 +92,8 @@ export struct ProjectListView {
   private rows: LazyDataSource<ListRow> = new LazyDataSource<ListRow>();
   /** 行数单独暴露，供界面判断空态 */
   @Local rowCount: number = 0;
+  /** 下拉刷新中 */
+  @Local refreshing: boolean = false;
 
   // ---- 弹层状态 ----
   @Local sheet: string = SheetKind.NONE;
@@ -135,6 +137,22 @@ export struct ProjectListView {
       }
     } finally {
       this.loading = false;
+    }
+  }
+
+  /**
+   * 下拉刷新。
+   *
+   * 除了重新拉项目，也顺带重建一次行序列 —— 筛选是在「我的」页改的，
+   * 虽然有订阅机制自动重建，但给用户一个手动兜底总没坏处：
+   * 界面没按预期更新时，下拉一下就能确认到底是数据问题还是刷新问题。
+   */
+  async onRefresh(): Promise<void> {
+    try {
+      await this.load();
+    } finally {
+      this.rebuildRows();
+      this.refreshing = false;
     }
   }
 
@@ -1043,35 +1061,40 @@ export struct ProjectListView {
    */
   @Builder
   projectList() {
-    List() {
-      LazyForEach(this.rows, (row: ListRow) => {
-        // 分两支而不是给 swipeAction 传 undefined ——
-        // 条件属性传 undefined 的行为没有保证，标题行也不该能左滑
-        if (row.kind === RowKind.PROJECT && row.project !== null) {
-          ListItem() {
-            this.projectCard(this.projectOf(row))
+    Refresh({ refreshing: $$this.refreshing }) {
+      List() {
+        LazyForEach(this.rows, (row: ListRow) => {
+          // 分两支而不是给 swipeAction 传 undefined ——
+          // 条件属性传 undefined 的行为没有保证，标题行也不该能左滑
+          if (row.kind === RowKind.PROJECT && row.project !== null) {
+            ListItem() {
+              this.projectCard(this.projectOf(row))
+            }
+            .padding({ left: 16, right: 16, bottom: 10 })
+            .swipeAction({
+              end: {
+                builder: () => { this.swipeActions(this.projectOf(row)) },
+                actionAreaDistance: 60
+              },
+              edgeEffect: SwipeEdgeEffect.Spring
+            })
+            .onClick(() => { this.openProject(this.projectOf(row)); })
+          } else {
+            ListItem() {
+              this.rowView(row)
+            }
           }
-          .padding({ left: 16, right: 16, bottom: 10 })
-          .swipeAction({
-            end: {
-              builder: () => { this.swipeActions(this.projectOf(row)) },
-              actionAreaDistance: 60
-            },
-            edgeEffect: SwipeEdgeEffect.Spring
-          })
-          .onClick(() => { this.openProject(this.projectOf(row)); })
-        } else {
-          ListItem() {
-            this.rowView(row)
-          }
-        }
-      }, (row: ListRow) => row.key)
+        }, (row: ListRow) => row.key)
+      }
+      .width('100%')
+      .height('100%')
+      // 上下各多建 8 行，快速滑动时不会出现空白
+      .cachedCount(8)
+      .scrollBar(BarState.Off)
     }
     .layoutWeight(1)
     .width('100%')
-    // 上下各多建 8 行，快速滑动时不会出现空白
-    .cachedCount(8)
-    .scrollBar(BarState.Off)
+    .onRefreshing(() => { this.onRefresh(); })
   }
 
   build() {

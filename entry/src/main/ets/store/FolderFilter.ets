@@ -45,24 +45,6 @@ function isWindowsPath(p: string): boolean {
   return p.length >= 2 && p.charAt(1) === ':';
 }
 
-/** path 是否在 root 之下（含自身） */
-export function isUnder(path: string, root: string): boolean {
-  let a = normalize(path);
-  let b = normalize(root);
-  if (b.length === 0) {
-    return false;
-  }
-  if (isWindowsPath(b) || isWindowsPath(a)) {
-    a = a.toLowerCase();
-    b = b.toLowerCase();
-  }
-  if (a === b) {
-    return true;
-  }
-  // 必须以 "root/" 开头，否则 /ab 会被误判为在 /a 之下
-  return a.startsWith(`${b}/`);
-}
-
 /** 取父目录，已经到根就返回空串 */
 function parentOf(p: string): string {
   const s = normalize(p);
@@ -75,6 +57,33 @@ function parentOf(p: string): string {
     return s.substring(0, 3);
   }
   return s.substring(0, i);
+}
+
+/**
+ * path 是否**直属**于 root。
+ *
+ * 只认两种情况：path 就是 root 本身，或 path 的父目录是 root。
+ * 不递归往下 —— 递归匹配时选一个稍微靠上的目录就会命中几乎所有项目
+ * （实测选 Desktop 能命中 110 个里的 104 个），开了筛选也看不出变化，
+ * 那就失去了筛选的意义。
+ */
+export function isDirectlyIn(path: string, root: string): boolean {
+  let a = normalize(path);
+  let b = normalize(root);
+  if (b.length === 0) {
+    return false;
+  }
+  if (isWindowsPath(b) || isWindowsPath(a)) {
+    a = a.toLowerCase();
+    b = b.toLowerCase();
+  }
+  if (a === b) {
+    return true;
+  }
+  // 父目录必须正好是 root。用父目录比较而不是前缀比较，
+  // 顺带避开了 /ab 被误判为在 /a 之下这类前缀陷阱
+  return normalize(parentOf(a)).toLowerCase() === b
+    || normalize(parentOf(a)) === b;
 }
 
 @ObservedV2
@@ -149,7 +158,7 @@ export class FolderFilterStore {
       this.visible = this.source;
     } else {
       this.visible = this.source.filter((p) =>
-        this.roots.some((r) => isUnder(p.path, r))
+        this.roots.some((r) => isDirectlyIn(p.path, r))
       );
     }
     this.notify();
@@ -188,7 +197,7 @@ export class FolderFilterStore {
 
   /** 某个目录下有多少个项目（不受当前筛选影响，始终基于全量） */
   countUnder(root: string): number {
-    return this.source.filter((p) => isUnder(p.path, root)).length;
+    return this.source.filter((p) => isDirectlyIn(p.path, root)).length;
   }
 
   /** 被筛掉的项目数，用于在界面上说明筛选的实际效果 */
@@ -209,44 +218,31 @@ export class FolderFilterStore {
    * 等同于选那个项目本身，作为"文件夹筛选"没有意义。
    */
   candidates(): FolderCandidate[] {
+    // 只统计**直接父目录**，不再逐级往上累加。
+    //
+    // 之前逐级累加是为了配合递归匹配，但那样 C:/Users 这种祖先目录
+    // 会显示"106 个项目"，选了却几乎筛不掉东西。现在匹配只认直属，
+    // 候选的计数也必须是直属数，否则界面上的数字和实际效果对不上。
     const counter = new Map<string, number>();
     for (const p of this.source) {
-      let dir = parentOf(p.path);
-      let guard = 0;
-      while (dir.length > 0 && guard < 12) {
+      const dir = parentOf(p.path);
+      if (dir.length > 0) {
         counter.set(dir, (counter.get(dir) ?? 0) + 1);
-        const next = parentOf(dir);
-        if (next === dir) {
-          break;
-        }
-        dir = next;
-        guard++;
       }
     }
 
-    const total = this.source.length;
     const out: FolderCandidate[] = [];
     counter.forEach((count: number, path: string) => {
-      // 覆盖全部项目的目录等于没筛，别浪费列表位置。
-      // 实测 "C:/" 和 "C:/Users" 就属于这类。
-      if (count >= 2 && count < total) {
-        out.push(new FolderCandidate(path, count));
-      }
+      out.push(new FolderCandidate(path, count));
     });
 
-    // 深的排前面。
-    //
-    // 直觉上该按项目数降序，但实测那样排出来最前面全是 C:/Users
-    // 这种覆盖面极广、筛了等于没筛的祖先目录，真正想选的工作目录
-    // 反而沉到最底下。用户要找的是"某个具体的工作文件夹"，
-    // 越具体的越该先看到；数量相同时再让项目多的靠前。
+    // 直属项目多的排前面 —— 现在的计数已经反映真实筛选效果，
+    // 不会再出现"数字很大但选了没用"的祖先目录
     out.sort((a, b) => {
-      const da = a.path.split('/').length;
-      const db = b.path.split('/').length;
-      if (da !== db) {
-        return db - da;
+      if (a.count !== b.count) {
+        return b.count - a.count;
       }
-      return b.count - a.count;
+      return a.path.length - b.path.length;
     });
     return out;
   }

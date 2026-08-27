@@ -268,7 +268,7 @@ export struct ProfileView {
       .border({ width: 1, color: theme.palette.border })
 
       if (folderFilter.roots.length === 0) {
-        Text('未添加时显示全部项目。添加后只显示这些目录下的会话。')
+        Text('未添加时显示全部项目。添加后只显示这些目录「直属」的会话，不含更深层的子目录。')
           .fontSize(theme.fs(FontSize.TINY))
           .fontColor(theme.palette.textTertiary)
           .width('100%')
@@ -307,7 +307,7 @@ export struct ProfileView {
           .width('100%')
 
         if (folderFilter.candidates().length > 0) {
-          Text('从已有项目中选择')
+          Text('从已有项目中选择（数字 = 该目录直属的项目数）')
             .fontSize(theme.fs(FontSize.TINY))
             .fontColor(theme.palette.textSecondary)
             .width('100%')
@@ -476,7 +476,7 @@ export struct ProfileView {
             .border({ width: 1, color: theme.palette.border })
             .onClick(() => { this.onSignOut(); })
 
-          Text('CC-Remoter v0.1.3')
+          Text('CC-Remoter v0.1.4')
             .fontSize(theme.fs(FontSize.TINY))
             .fontColor(theme.palette.textTertiary)
             .width('100%')
