@@ -5,9 +5,9 @@
  * 没有引第三方库：ArkTS 生态里的 markdown 库要么依赖 DOM，要么体积
  * 远超需要。模型回复用到的语法其实很有限，自己解析反而可控。
  *
- * 支持：标题、代码块、引用、有序/无序列表、分割线、段落，
+ * 支持：标题、代码块、引用、有序/无序列表、分割线、表格、段落，
  * 行内支持 **粗体**、*斜体*、`代码`、[文字](链接)。
- * 不支持表格和嵌套列表 —— 手机窄屏上这两者本来也难读。
+ * 不支持嵌套列表 —— 手机窄屏上本来也难读。
  */
 
 /** 块级类型 */
@@ -18,6 +18,7 @@ export class MdType {
   static readonly QUOTE: string = 'quote';
   static readonly LIST_ITEM: string = 'li';
   static readonly DIVIDER: string = 'hr';
+  static readonly TABLE: string = 'table';
 }
 
 export class MdBlock {
@@ -32,6 +33,10 @@ export class MdBlock {
   ordered: boolean = false;
   /** 有序列表的序号 */
   index: number = 0;
+  /** 表格：表头单元格 */
+  header: string[] = [];
+  /** 表格：数据行 */
+  rows: string[][] = [];
 
   constructor(type: string, text: string) {
     this.type = type;
@@ -111,6 +116,39 @@ function isDivider(line: string): boolean {
   return true;
 }
 
+/**
+ * 表格分隔行：只由 | - : 空格组成，且至少有一个 -。
+ * 例如 |---|:--:|---|
+ */
+function isTableDivider(line: string): boolean {
+  if (line.indexOf('|') < 0 || line.indexOf('-') < 0) {
+    return false;
+  }
+  for (let i = 0; i < line.length; i++) {
+    const c = line.charAt(i);
+    if (c !== '|' && c !== '-' && c !== ':' && c !== ' ') {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** 按 | 切分一行单元格，去掉首尾的空格与空单元 */
+function splitRow(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) {
+    t = t.substring(1);
+  }
+  if (t.endsWith('|')) {
+    t = t.substring(0, t.length - 1);
+  }
+  const out: string[] = [];
+  for (const cell of t.split('|')) {
+    out.push(cell.trim());
+  }
+  return out;
+}
+
 export function parseMarkdown(src: string): MdBlock[] {
   const blocks: MdBlock[] = [];
   const lines = src.split('\n');
@@ -181,6 +219,28 @@ export function parseMarkdown(src: string): MdBlock[] {
         i++;
       }
       blocks.push(new MdBlock(MdType.QUOTE, body.join('\n')));
+      continue;
+    }
+
+    // ---- 表格 ----
+    //
+    // 判定条件是「本行含 |」且「下一行是分隔行」（形如 |---|:--:|）。
+    // 只看当前行含 | 会把正文里带竖线的句子误判成表格。
+    if (trimmed.indexOf('|') >= 0 && i + 1 < lines.length
+      && isTableDivider(lines[i + 1].trim())) {
+      flushPara();
+      const b = new MdBlock(MdType.TABLE, '');
+      b.header = splitRow(trimmed);
+      i += 2; // 跳过表头和分隔行
+      while (i < lines.length) {
+        const row = lines[i].trim();
+        if (row.length === 0 || row.indexOf('|') < 0) {
+          break;
+        }
+        b.rows.push(splitRow(row));
+        i++;
+      }
+      blocks.push(b);
       continue;
     }
 

@@ -154,6 +154,31 @@ export class AppStore {
     this.itemCount = next.length;
   }
 
+  /**
+   * 把更早的历史插到列表前面。
+   *
+   * 渐进式铺历史用：先显示最后一屏，再往前补。
+   * LazyDataSource 只支持尾部追加，所以这里整体重建 —— 分批不多
+   * （每批 40 条），重建的代价远小于让用户白屏等全部就绪。
+   */
+  prependItems(events: WireEvent[]): void {
+    if (events.length === 0) {
+      return;
+    }
+    const head: ChatItem[] = [];
+    for (const e of events) {
+      head.push(new ChatItem(e));
+    }
+    const next = head.concat(this.itemSource.all());
+
+    this.index.clear();
+    for (let i = 0; i < next.length; i++) {
+      this.index.set(next[i].id, i);
+    }
+    this.itemSource.setAll(next);
+    this.itemCount = next.length;
+  }
+
   /** 按 id 找下标，供提问索引跳转 */
   indexOfItem(id: string): number {
     const at = this.index.get(id);

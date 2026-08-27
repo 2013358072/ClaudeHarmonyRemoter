@@ -44,6 +44,14 @@ const UUID_RE =
  */
 const HEAD_MAX_LINES = 400;
 
+/**
+ * 找自定义标题时读的尾部字节数。
+ *
+ * renameSession 是追加写的，标题在文件末尾。取 64KB 是因为重命名
+ * 记录本身很短，而整文件读一遍对 6.9MB 的大会话开销不可接受。
+ */
+const TAIL_TITLE_BYTES = 64 * 1024;
+
 /** 扫描项目目录的并发上限 */
 const SCAN_CONCURRENCY = 12;
 
@@ -140,6 +148,11 @@ async function parseSession(
     let cwd = '';
     let gitBranch = '';
     let title = '';
+    /**
+     * 用户通过 /rename 或我们的重命名接口设置的标题。
+     * 它优先于「首条用户消息」—— 用户特意改过名字，就该显示那个。
+     */
+    let customTitle = '';
 
     // 逐行流式扫描，拿齐 cwd 和标题就停 —— 绝大多数会话第一行就够了
     try {
@@ -163,6 +176,21 @@ async function parseSession(
         return null;
     }
 
+    // 重命名是**追加**写的，标题落在文件末尾，扫头部读不到。
+    // 所以单独读一小段尾巴。窗口取 64KB：重命名记录很短，
+    // 而整文件读一遍对 6.9MB 的会话是不可接受的开销。
+    try {
+        for await (const record of readJsonlTail(filePath, TAIL_TITLE_BYTES)) {
+            const ct = record['customTitle'];
+            if (typeof ct === 'string' && ct.trim().length > 0) {
+                // 不 break：同一会话可能被改名多次，最后一条才是当前标题
+                customTitle = ct.trim().slice(0, 60);
+            }
+        }
+    } catch {
+        // 读不到就退化成用首条用户消息当标题，不影响会话可用
+    }
+
     // 拿不到 cwd 说明这不是一个可用的会话文件
     if (!cwd) return null;
 
@@ -182,7 +210,7 @@ async function parseSession(
         sessionId,
         cwd,
         gitBranch,
-        title: title || '(无标题会话)',
+        title: customTitle || title || '(无标题会话)',
         messageCount,
         lastActiveAt: stat.mtimeMs,
     };
@@ -378,6 +406,35 @@ export class SessionScanner {
         if (sessions.length === 0) return null;
         const path = sessions[0]!.cwd;
         return isAllowed(path, this.projectRoots) ? path : null;
+    }
+
+    /**
+     * 找到某个 sessionId 的真实工作目录（不是 .claude/projects 下的编码目录）。
+     *
+     * renameSession 的 dir 参数要的是**项目路径本身**，
+     * 编码成 projects 下的目录名由 SDK 自己做 —— 传编码后的路径会报
+     * "Session ... not found in project directory"。
+     */
+    async findSessionCwd(sessionId: string): Promise<string | null> {
+        if (!UUID_RE.test(sessionId)) return null;
+
+        let dirs: string[];
+        try {
+            dirs = readdirSync(this.projectsRoot, { withFileTypes: true })
+                .filter((d) => d.isDirectory())
+                .map((d) => d.name);
+        } catch {
+            return null;
+        }
+
+        for (const projectId of dirs) {
+            const filePath = join(this.projectsRoot, projectId, `${sessionId}.jsonl`);
+            const meta = await parseSession(filePath, sessionId, false);
+            if (meta && isAllowed(meta.cwd, this.projectRoots)) {
+                return meta.cwd;
+            }
+        }
+        return null;
     }
 
     /** 找到某个 sessionId 所属的项目目录，用于历史消息接口 */

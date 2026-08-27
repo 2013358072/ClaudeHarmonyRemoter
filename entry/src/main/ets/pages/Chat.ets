@@ -30,6 +30,7 @@ import { parseMarkdown, parseInline, MdBlock, MdSpan, MdType } from '../utils/Ma
 import { projectPrefs } from '../store/ProjectPrefs';
 import { notifier } from '../utils/Notifier';
 import { appLifecycle } from '../store/AppLifecycle';
+import { pasteboard } from '@kit.BasicServicesKit';
 
 /** 路由参数 */
 export interface ChatParam {
@@ -70,6 +71,8 @@ export struct ChatView {
   @Local drawerOpen: boolean = false;
 
   private scroller: Scroller = new Scroller();
+  /** 本次进入会话后是否已经发过消息（首条会触发 claude 进程启动） */
+  private startedOnce: boolean = false;
 
 
   async aboutToAppear(): Promise<void> {
@@ -82,18 +85,16 @@ export struct ChatView {
     if (this.param.sessionId.length > 0) {
       try {
         const history: WireEvent[] = await apiClient.loadHistory(this.param.sessionId);
-        appStore.resetItems(history);
+        await this.fillProgressively(history);
       } catch (e) {
         appStore.banner = `历史消息加载失败：${(e as ApiException).message}`;
+        this.loadingHistory = false;
       }
+    } else {
+      this.loadingHistory = false;
     }
-    this.loadingHistory = false;
     // 进到这个会话就把它遗留的通知收起来，别在通知栏留个已读的
     notifier.clear(this.param.projectId);
-
-    // 历史铺完直接定位到最新一条 —— 进来就看到最近的对话，
-    // 而不是从几百条之前开始往下翻
-    this.scrollToBottom(220);
 
     this.connect();
   }
@@ -124,6 +125,10 @@ export struct ChatView {
         }
       },
       onEvent: (event: WireEvent): void => {
+        // 有任何事件回来就说明进程已就绪，收起启动提示
+        if (appStore.banner.startsWith('正在启动会话')) {
+          appStore.banner = '';
+        }
         appStore.appendEvent(event);
         this.scrollToBottom();
       },
@@ -165,6 +170,47 @@ export struct ChatView {
     wsClient.attach(this.param.projectId, this.param.sessionId);
   }
 
+  /**
+   * 分批把历史铺进列表，让对话逐条列出来而不是一次性砸进去。
+   *
+   * 先放最后一屏（用户进来就该看到最新的），立刻结束 loading 状态并滚到底，
+   * 剩下的往前补。这样首屏几乎瞬时可见，而不是白屏等全部就绪。
+   *
+   * 每批之间让出一帧：ArkUI 是单线程渲染，不让出的话循环会把整个
+   * 主线程占满，分批就失去了意义。
+   */
+  private async fillProgressively(history: WireEvent[]): Promise<void> {
+    const FIRST = 30;   // 首屏条数
+    const CHUNK = 40;   // 后续每批
+
+    if (history.length <= FIRST) {
+      appStore.resetItems(history);
+      this.loadingHistory = false;
+      this.scrollToBottom(220);
+      return;
+    }
+
+    // 先上最后 FIRST 条
+    const tailStart = history.length - FIRST;
+    appStore.resetItems(history.slice(tailStart));
+    this.loadingHistory = false;
+    this.scrollToBottom(220);
+
+    // 再把更早的分批补到前面
+    let end = tailStart;
+    while (end > 0) {
+      const start = end - CHUNK > 0 ? end - CHUNK : 0;
+      await this.nextFrame();
+      appStore.prependItems(history.slice(start, end));
+      end = start;
+    }
+  }
+
+  /** 让出一帧，避免连续填充把主线程占满 */
+  private nextFrame(): Promise<void> {
+    return new Promise((resolve) => { setTimeout(resolve, 16); });
+  }
+
   /** 滚到底部。delay 要留够渲染时间，否则拿到的还是旧高度 */
   private scrollToBottom(delay: number = 50): void {
     setTimeout(() => {
@@ -180,6 +226,12 @@ export struct ChatView {
     if (appStore.wsState !== WsState.OPEN) {
       this.getUIContext().getPromptAction().showToast({ message: '尚未连接到服务器' });
       return;
+    }
+    // 第一条消息会真正拉起 claude 进程，大会话上要加载整个 transcript，
+    // 可能十几秒没动静。给个明确提示，否则用户以为发失败了
+    if (!this.startedOnce) {
+      this.startedOnce = true;
+      appStore.banner = '正在启动会话，首次发送需要等待 Claude 加载历史…';
     }
     wsClient.sendText(text);
     this.draft = '';
@@ -353,6 +405,44 @@ export struct ChatView {
       }
       .width('100%')
       .alignItems(VerticalAlign.Top)
+    } else if (b.type === MdType.TABLE) {
+      // 横向可滚动：手机屏幕窄，列一多必然放不下，
+      // 强行压缩列宽会让每个单元格都折成好几行，比滚动更难读
+      Scroll() {
+        Column() {
+          Row() {
+            ForEach(b.header, (cell: string, ci: number) => {
+              Text(cell)
+                .fontSize(size - 1)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(theme.palette.text)
+                .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                .constraintSize({ minWidth: 76 })
+            }, (cell: string, ci: number) => `h${ci}`)
+          }
+          .backgroundColor(theme.palette.surfaceAlt)
+
+          ForEach(b.rows, (row: string[], ri: number) => {
+            Divider().strokeWidth(0.5).color(theme.palette.border)
+            Row() {
+              ForEach(row, (cell: string, ci: number) => {
+                Text(cell)
+                  .fontSize(size - 1)
+                  .fontColor(theme.palette.textSecondary)
+                  .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+                  .constraintSize({ minWidth: 76 })
+              }, (cell: string, ci: number) => `c${ri}_${ci}`)
+            }
+          }, (row: string[], ri: number) => `r${ri}`)
+        }
+        .alignItems(HorizontalAlign.Start)
+      }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .width('100%')
+      .align(Alignment.TopStart)
+      .borderRadius(10)
+      .border({ width: 1, color: theme.palette.border })
     } else if (b.type === MdType.DIVIDER) {
       Divider()
         .strokeWidth(0.5)
@@ -449,6 +539,16 @@ export struct ChatView {
   }
 
   /** 用户消息：右对齐气泡，纯文本不做 Markdown 解析 */
+  /** 复制文本到剪贴板 */
+  private copyText(text: string): void {
+    const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
+    pasteboard.getSystemPasteboard().setData(data).then(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '已复制' });
+    }).catch(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '复制失败' });
+    });
+  }
+
   @Builder
   userBubble(item: ChatItem) {
     Row() {
@@ -461,6 +561,12 @@ export struct ChatView {
         .backgroundColor(theme.palette.userBubble)
         .borderRadius(16)
         .constraintSize({ maxWidth: '85%' })
+        // 长按复制。不做常驻的复制按钮 —— 每条消息挂一个图标会让
+        // 本就窄的对话区更挤，而复制是低频操作
+        .gesture(
+          LongPressGesture({ repeat: false })
+            .onAction(() => { this.copyText(item.text); })
+        )
     }
     .width('100%')
     .padding({ left: 20, right: 20, top: 8, bottom: 8 })
@@ -477,6 +583,11 @@ export struct ChatView {
     .width('100%')
     .alignItems(HorizontalAlign.Start)
     .padding({ left: 20, right: 20, top: 6, bottom: 10 })
+    // 模型回复同样长按复制，复制的是原始 Markdown 文本
+    .gesture(
+      LongPressGesture({ repeat: false })
+        .onAction(() => { this.copyText(item.text); })
+    )
   }
 
   /**

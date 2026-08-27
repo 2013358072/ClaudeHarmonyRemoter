@@ -11,6 +11,7 @@ import type { TokenStore } from '../auth/tokens.js';
 import type { PairingManager } from '../auth/pairing.js';
 import type { SessionScanner } from '../claude/scanner.js';
 import { loadHistory } from '../claude/history.js';
+import { renameSession } from '@anthropic-ai/claude-agent-sdk';
 import type { PairResponse } from '../protocol/wire.js';
 
 /** 请求体最大字节数，防止有人拿超大 body 打爆内存 */
@@ -188,6 +189,52 @@ export function createHttpHandler(deps: HttpDeps) {
                 }
                 const limit = parseLimit(url.searchParams.get('limit'));
                 sendJson(res, 200, await loadHistory(filePath, { limit }));
+                return;
+            }
+
+            // /api/sessions/:id/rename
+            const renameMatch = path.match(/^\/api\/sessions\/([^/]+)\/rename$/);
+            if (method === 'POST' && renameMatch) {
+                const sessionId = decodeURIComponent(renameMatch[1]!);
+                const filePath = await scanner.findSessionFile(sessionId);
+                if (!filePath) {
+                    sendError(res, 404, '会话不存在');
+                    return;
+                }
+
+                let title = '';
+                try {
+                    const parsed: unknown = JSON.parse(await readBody(req));
+                    if (typeof parsed === 'object' && parsed !== null) {
+                        const t = (parsed as Record<string, unknown>)['title'];
+                        if (typeof t === 'string') title = t.trim();
+                    }
+                } catch {
+                    sendError(res, 400, '请求体不是合法 JSON');
+                    return;
+                }
+                if (title.length === 0) {
+                    sendError(res, 400, '标题不能为空');
+                    return;
+                }
+                if (title.length > 60) title = title.slice(0, 60);
+
+                try {
+                    // 走 SDK 而不是自己往 jsonl 里塞记录 ——
+                    // 这样改的名字 Claude Code 自己也认，在终端 /resume
+                    // 的选择器里看到的就是同一个标题，真正做到两端同步
+                    const cwd = await scanner.findSessionCwd(sessionId);
+                    if (!cwd) {
+                        sendError(res, 404, '会话不存在');
+                        return;
+                    }
+                    await renameSession(sessionId, title, { dir: cwd });
+                } catch (e) {
+                    console.error('[http] 重命名会话失败:', e);
+                    sendError(res, 500, '重命名失败');
+                    return;
+                }
+                sendJson(res, 200, { ok: true, title });
                 return;
             }
 
