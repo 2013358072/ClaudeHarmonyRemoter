@@ -68,8 +68,6 @@ export struct ChatView {
   @Local composerHeight: number = COMPOSER_MIN_H;
   /** 提问索引侧栏是否展开 */
   @Local drawerOpen: boolean = false;
-  /** 列表总条数，用于右侧滑动杆定位 */
-  @Local scrollRatio: number = 1;
 
   private scroller: Scroller = new Scroller();
 
