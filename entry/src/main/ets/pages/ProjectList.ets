@@ -22,6 +22,7 @@ import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { folderFilter } from '../store/FolderFilter';
 import { LazyDataSource } from '../utils/LazyDataSource';
+import { notifier } from '../utils/Notifier';
 
 /** 当前打开的弹层。名字不能叫 Sheet —— 会和 ArkUI 的 bindSheet 一族撞车 */
 class SheetKind {
@@ -906,6 +907,27 @@ export struct ProjectListView {
 
       Divider().strokeWidth(0.5).color(theme.palette.border)
 
+      Row() {
+        Column({ space: 2 }) {
+          Text('消息通知')
+            .fontSize(theme.fs(FontSize.BODY))
+            .fontColor(theme.palette.text)
+          Text('切到后台时，需要授权或任务完成会提醒')
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.textTertiary)
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+
+        Toggle({ type: ToggleType.Switch, isOn: projectPrefs.isNotifyOn(this.targetId) })
+          .selectedColor(theme.palette.accent)
+          .onChange((v: boolean) => { this.onNotifyChange(v); })
+      }
+      .width('100%')
+      .padding({ top: 13, bottom: 13 })
+
+      Divider().strokeWidth(0.5).color(theme.palette.border)
+
       Column({ space: 6 }) {
         Row({ space: 8 }) {
           Text('工作目录')
@@ -933,6 +955,27 @@ export struct ProjectListView {
       .onClick(() => { this.copyPath(this.targetPath()); })
     }
     .width('100%')
+  }
+
+  /**
+   * 切换通知开关。
+   *
+   * 开启时立刻申请系统通知权限 —— 等到真要发通知才申请的话，
+   * 用户早已切到后台，弹窗根本看不见，表现就是"开了但没提醒"。
+   */
+  private onNotifyChange(on: boolean): void {
+    const pid = this.targetId;
+    projectPrefs.setNotify(pid, on);
+    if (!on) {
+      return;
+    }
+    notifier.ensureReady().then((ok: boolean) => {
+      if (!ok) {
+        this.getUIContext().getPromptAction().showToast({
+          message: '系统通知权限未开启，请到设置里允许'
+        });
+      }
+    });
   }
 
   /** 当前操作目标的显示名 */

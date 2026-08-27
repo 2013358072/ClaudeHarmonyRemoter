@@ -1,6 +1,7 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { appLifecycle } from '../store/AppLifecycle';
 
 const DOMAIN = 0x0000;
 
@@ -37,12 +38,14 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
-    // Ability has brought to foreground
+    // 组件级的 onPageShow 只对 @Entry 生效，NavDestination 拿不到，
+    // 所以前后台状态统一由这里往 appLifecycle 写
+    appLifecycle.setForeground(true);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
-    // Ability has back to background
+    appLifecycle.setForeground(false);
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
   }
 }

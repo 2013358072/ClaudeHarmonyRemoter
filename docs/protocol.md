@@ -168,7 +168,9 @@ SDK 类型定义说 `title` 是"bridge 渲染好的完整提示句（如 Claude 
 | 回调 | `@Event` |
 | `@Provide` / `@Consume` | `@Provider()` / `@Consumer()` |
 
-另外 `onPageShow` 只对 `@Entry` 组件生效，普通子组件里写了不会触发，是死代码。
+另外 `onPageShow` / `onPageHide` 只对 `@Entry` 组件生效，普通子组件和 NavDestination 里写了不会触发，是死代码。
+
+这个坑很隐蔽：做通知功能时用它判断 App 是否在前台，编译通过、运行不报错，但回调从不执行，`foreground` 恒为初始值，表现是通知功能接好了却一条都发不出来。真正的前后台信号只有 UIAbility 的 `onForeground` / `onBackground`，见 `store/AppLifecycle.ets`。
 
 ### 几个会静默撞车的命名
 

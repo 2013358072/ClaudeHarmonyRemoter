@@ -18,6 +18,16 @@
       {
         // 用于在断网时给出准确提示，而不是笼统地报连接失败
         "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        // 扫码配对。Scan Kit 的默认扫码界面需要相机权限，
+        // user_grant 类型，首次使用时由系统弹窗询问
+        "name": "ohos.permission.CAMERA",
+        "reason": "$string:reason_camera",
+        "usedScene": {
+          "abilities": ["EntryAbility"],
+          "when": "inuse"
+        }
       }
     ],
     "abilities": [

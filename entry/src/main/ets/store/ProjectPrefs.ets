@@ -33,6 +33,7 @@ interface MetaJson {
   alias: string;
   pinned: boolean;
   groupId: string;
+  notify?: boolean;
 }
 
 interface PrefsJson {
@@ -68,12 +69,23 @@ export class ProjectMeta {
   @Trace pinned: boolean;
   /** 所属分组 id，空字符串表示未分组 */
   @Trace groupId: string;
+  /**
+   * 是否推送这个项目的通知。
+   *
+   * 默认关闭 —— 通知是打扰，得由用户明确开启。
+   * 而且大多数项目是历史记录，只有当下在推进的那一两个才需要提醒。
+   */
+  @Trace notify: boolean;
 
-  constructor(projectId: string, alias: string, pinned: boolean, groupId: string) {
+  constructor(
+    projectId: string, alias: string, pinned: boolean,
+    groupId: string, notify: boolean = false
+  ) {
     this.projectId = projectId;
     this.alias = alias;
     this.pinned = pinned;
     this.groupId = groupId;
+    this.notify = notify;
   }
 }
 
@@ -103,7 +115,7 @@ export class ProjectPrefsStore {
       const ms: ProjectMeta[] = [];
       if (parsed.metas !== undefined) {
         for (const m of parsed.metas) {
-          ms.push(new ProjectMeta(m.projectId, m.alias, m.pinned, m.groupId));
+          ms.push(new ProjectMeta(m.projectId, m.alias, m.pinned, m.groupId, m.notify === true));
         }
       }
       this.groups = gs.sort((a, b) => a.order - b.order);
@@ -121,7 +133,10 @@ export class ProjectPrefsStore {
       return { id: g.id, name: g.name, collapsed: g.collapsed, order: g.order };
     });
     const ms: MetaJson[] = this.metas.map((m): MetaJson => {
-      return { projectId: m.projectId, alias: m.alias, pinned: m.pinned, groupId: m.groupId };
+      return {
+        projectId: m.projectId, alias: m.alias, pinned: m.pinned,
+        groupId: m.groupId, notify: m.notify
+      };
     });
     const data: PrefsJson = { groups: gs, metas: ms };
     await this.store.put(KEY_DATA, JSON.stringify(data));
@@ -143,7 +158,7 @@ export class ProjectPrefsStore {
     if (found !== undefined) {
       return found;
     }
-    const created = new ProjectMeta(projectId, '', false, NO_GROUP);
+    const created = new ProjectMeta(projectId, '', false, NO_GROUP, false);
     this.metas.push(created);
     return created;
   }
@@ -165,6 +180,18 @@ export class ProjectPrefsStore {
   groupIdOf(projectId: string): string {
     const m = this.metas.find((x) => x.projectId === projectId);
     return m === undefined ? NO_GROUP : m.groupId;
+  }
+
+  /** 该项目是否开启了通知 */
+  isNotifyOn(projectId: string): boolean {
+    const m = this.metas.find((x) => x.projectId === projectId);
+    return m !== undefined && m.notify;
+  }
+
+  async setNotify(projectId: string, on: boolean): Promise<void> {
+    const m = this.metaOf(projectId);
+    m.notify = on;
+    await this.persist();
   }
 
   async togglePin(projectId: string): Promise<void> {

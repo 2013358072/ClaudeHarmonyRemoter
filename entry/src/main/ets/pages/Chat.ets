@@ -27,6 +27,9 @@ import {
 } from '../net/Protocol';
 import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 import { parseMarkdown, parseInline, MdBlock, MdSpan, MdType } from '../utils/Markdown';
+import { projectPrefs } from '../store/ProjectPrefs';
+import { notifier } from '../utils/Notifier';
+import { appLifecycle } from '../store/AppLifecycle';
 
 /** 路由参数 */
 export interface ChatParam {
@@ -70,6 +73,7 @@ export struct ChatView {
 
   private scroller: Scroller = new Scroller();
 
+
   async aboutToAppear(): Promise<void> {
     appStore.clearChat();
     appStore.currentProjectId = this.param.projectId;
@@ -86,6 +90,8 @@ export struct ChatView {
       }
     }
     this.loadingHistory = false;
+    // 进到这个会话就把它遗留的通知收起来，别在通知栏留个已读的
+    notifier.clear(this.param.projectId);
 
     // 历史铺完直接定位到最新一条 —— 进来就看到最近的对话，
     // 而不是从几百条之前开始往下翻
@@ -97,6 +103,16 @@ export struct ChatView {
   aboutToDisappear(): void {
     wsClient.close();
     appStore.clearChat();
+  }
+
+  /**
+   * 该发通知吗：开了开关、且 App 不在前台。
+   *
+   * 前台状态取自 appLifecycle（由 UIAbility 写入），不能用组件的
+   * onPageShow —— 那个只对 @Entry 生效，聊天页是 NavDestination。
+   */
+  private shouldNotify(): boolean {
+    return !appLifecycle.foreground && projectPrefs.isNotifyOn(this.param.projectId);
   }
 
   private connect(): void {
@@ -114,10 +130,27 @@ export struct ChatView {
         this.scrollToBottom();
       },
       onThinking: (thinking: boolean): void => {
+        // 从思考中变为空闲，说明这一轮跑完了
+        const finished = appStore.thinking && !thinking;
         appStore.thinking = thinking;
+        if (finished && this.shouldNotify()) {
+          notifier.post(
+            this.param.projectId,
+            `${this.param.projectName} 已完成`,
+            this.lastAssistantLine()
+          );
+        }
       },
       onPermissionRequest: (request: PermissionRequest): void => {
         appStore.pendingPermission = request;
+        // 需要授权是最该打断用户的时刻 —— 不批准的话任务就卡在这
+        if (this.shouldNotify()) {
+          notifier.post(
+            this.param.projectId,
+            `${this.param.projectName} 需要授权`,
+            request.title
+          );
+        }
       },
       onPermissionClosed: (requestId: string): void => {
         appStore.closePermission(requestId);
@@ -194,6 +227,19 @@ export struct ChatView {
 
   private connected(): boolean {
     return appStore.wsState === WsState.OPEN;
+  }
+
+  /** 最后一条模型回复的首行，用作通知正文 */
+  private lastAssistantLine(): string {
+    const items = appStore.itemsSnapshot();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === EventKind.TEXT && it.role !== Role.USER && it.text.length > 0) {
+        const line = it.text.replace(/\s+/g, ' ').trim();
+        return line.length > 60 ? `${line.substring(0, 60)}…` : line;
+      }
+    }
+    return '任务已结束';
   }
 
   /** 提取所有用户提问，供侧栏索引 */

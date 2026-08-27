@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "CC-Remoter"
+    },
+    {
+      "name": "reason_camera",
+      "value": "扫描服务器终端显示的二维码完成配对"
     }
   ]
 }

@@ -14,6 +14,10 @@ import { appStore } from '../store/AppStore';
 import { PairResponse, PingResponse } from '../net/Protocol';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { theme, FontSize } from '../theme/Theme';
+import { scanCore, scanBarcode } from '@kit.ScanKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { common } from '@kit.AbilityKit';
+import { parsePairPayload, PairPayload } from '../utils/PairPayload';
 
 @ComponentV2
 export struct PairingView {
@@ -34,6 +38,56 @@ export struct PairingView {
   private parsePort(): number {
     const n = Number.parseInt(this.port, 10);
     return Number.isInteger(n) && n > 0 && n < 65536 ? n : 4517;
+  }
+
+  /**
+   * 扫码配对：一步直达。
+   *
+   * 二维码里 host / port / code 都有，没必要再让用户走"先验地址再输码"
+   * 那两步 —— 手输时分两步是为了区分错因，扫码则不存在输错的可能。
+   * 所以直接调 pair，失败了再回落到手动流程并把地址填好。
+   */
+  async scanAndPair(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+    this.errorText = '';
+
+    let raw = '';
+    try {
+      const options: scanBarcode.ScanOptions = {
+        scanTypes: [scanCore.ScanType.QR_CODE],
+        enableMultiMode: false,
+        enableAlbum: true
+      };
+      // getHostContext() 返回 Context | undefined，不收窄的话
+      // 三个重载选不出来，会推断成 void & Promise<ScanResult>
+      const ctx = this.getUIContext().getHostContext() as common.Context;
+      const result: scanBarcode.ScanResult =
+        await scanBarcode.startScanForResult(ctx, options);
+      raw = result.originalValue ?? '';
+    } catch (e) {
+      const err = e as BusinessError;
+      // 用户主动取消扫码不是错误，不该弹红字
+      if (err.code !== 1000500001) {
+        this.errorText = `扫码失败：${err.message ?? '未知错误'}`;
+      }
+      return;
+    }
+
+    const payload: PairPayload | null = parsePairPayload(raw);
+    if (payload === null) {
+      this.errorText = '这个二维码不是 CC-Remoter 的配对码';
+      return;
+    }
+
+    // 把地址回填，失败时用户可以直接接着手动改
+    this.host = payload.host;
+    this.port = `${payload.port}`;
+    this.code = payload.code;
+    this.hostVerified = true;
+
+    await this.submitCode();
   }
 
   /** 第一步：校验地址可达 */
@@ -287,6 +341,35 @@ export struct PairingView {
               .margin({ top: 4 })
           }
           .width('100%')
+
+          // 扫码入口放在表单之后：服务端终端上二维码和数字码是并列的，
+          // 但扫码明显更省事，给它一个独立且醒目的位置
+          Row({ space: 10 }) {
+            Row()
+              .layoutWeight(1)
+              .height(0.5)
+              .backgroundColor(theme.palette.border)
+            Text('或')
+              .fontSize(theme.fs(FontSize.TINY))
+              .fontColor(theme.palette.textTertiary)
+            Row()
+              .layoutWeight(1)
+              .height(0.5)
+              .backgroundColor(theme.palette.border)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+          .margin({ top: 4 })
+
+          Button('扫描二维码配对')
+            .width('100%')
+            .height(48)
+            .fontSize(theme.fs(FontSize.BODY))
+            .fontColor(theme.palette.accent)
+            .backgroundColor(theme.palette.surfaceAlt)
+            .borderRadius(24)
+            .enabled(!this.busy)
+            .onClick(() => { this.scanAndPair(); })
 
           Text('在服务器上运行服务端，终端会显示地址和配对码')
             .fontSize(theme.fs(FontSize.TINY))
