@@ -15,6 +15,7 @@
 
 import { WireEvent, ProjectInfo, SessionInfo, EventKind, PermissionRequest } from '../net/Protocol';
 import { WsState } from '../net/WsClient';
+import { LazyDataSource } from '../utils/LazyDataSource';
 
 /**
  * 聊天列表里的一条。
@@ -87,7 +88,18 @@ export class AppStore {
   @Trace currentProjectName: string = '';
   @Trace currentSessionId: string = '';
   @Trace thinking: boolean = false;
-  @Trace items: ChatItem[] = [];
+  /**
+   * 聊天内容的数据源。
+   *
+   * 用 LazyDataSource 而不是 @Trace 数组：ArkUI 的 ForEach 没有虚拟化，
+   * 几百条消息会被一次性全部实例化。LazyForEach 只建可见区域附近的，
+   * 而且追加消息时只通知增量，不会整表重建。
+   *
+   * 它不是 @Trace —— 刷新由 DataChangeListener 驱动，不走状态观察。
+   */
+  readonly itemSource: LazyDataSource<ChatItem> = new LazyDataSource<ChatItem>();
+  /** 条数单独用 @Trace 暴露，供界面判断空态 */
+  @Trace itemCount: number = 0;
   /** 非空时在聊天页顶部显示错误条 */
   @Trace banner: string = '';
 
@@ -116,15 +128,18 @@ export class AppStore {
     }
 
     const at = this.index.get(e.id);
-    if (at !== undefined && at < this.items.length) {
-      this.items[at].merge(e);
+    if (at !== undefined) {
+      // 同 id 再来一次是状态更新（如工具从 running 变 ok）。
+      // ChatItem 自身是 @ObservedV2，改字段就会刷新那一行；
+      // 再通知一次数据源是为了让 LazyForEach 感知到该项已变。
+      this.itemSource.getData(at).merge(e);
+      this.itemSource.notifyChange(at);
       return;
     }
 
-    const item = new ChatItem(e);
-    // 直接 push 到 @Trace 数组即可触发刷新
-    this.items.push(item);
-    this.index.set(e.id, this.items.length - 1);
+    this.itemSource.append(new ChatItem(e));
+    this.index.set(e.id, this.itemSource.totalCount() - 1);
+    this.itemCount = this.itemSource.totalCount();
   }
 
   /** 用历史消息重置列表 */
@@ -135,11 +150,24 @@ export class AppStore {
       next.push(new ChatItem(events[i]));
       this.index.set(events[i].id, i);
     }
-    this.items = next;
+    this.itemSource.setAll(next);
+    this.itemCount = next.length;
+  }
+
+  /** 按 id 找下标，供提问索引跳转 */
+  indexOfItem(id: string): number {
+    const at = this.index.get(id);
+    return at === undefined ? -1 : at;
+  }
+
+  /** 只读快照，供提问索引等做遍历 */
+  itemsSnapshot(): ChatItem[] {
+    return this.itemSource.all();
   }
 
   clearChat(): void {
-    this.items = [];
+    this.itemSource.clear();
+    this.itemCount = 0;
     this.index.clear();
     this.thinking = false;
     this.banner = '';

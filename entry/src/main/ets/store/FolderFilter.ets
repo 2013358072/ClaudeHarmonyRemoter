@@ -87,6 +87,32 @@ export class FolderFilterStore {
   /** 未过滤的原始列表 */
   private source: ProjectInfo[] = [];
   private store: preferences.Preferences | null = null;
+  /**
+   * 变更监听。
+   *
+   * visible 是 @Trace，读它的界面会自动刷新；但项目列表把分区**拍平成了
+   * 行序列**（为了用 LazyForEach），那份派生数据得靠命令式重建。
+   * 而配置在「我的」页改、列表在「对话」页用，Tab 之间切换不会重新
+   * aboutToAppear —— 没有这个通知，改完筛选切回去列表还是旧的。
+   */
+  private listeners: Array<() => void> = [];
+
+  /** 注册变更回调，返回取消注册的函数 */
+  onChanged(cb: () => void): () => void {
+    this.listeners.push(cb);
+    return () => {
+      const i = this.listeners.indexOf(cb);
+      if (i >= 0) {
+        this.listeners.splice(i, 1);
+      }
+    };
+  }
+
+  private notify(): void {
+    for (const cb of this.listeners) {
+      cb();
+    }
+  }
 
   async init(context: common.UIAbilityContext): Promise<void> {
     this.store = await preferences.getPreferences(context, STORE_NAME);
@@ -121,11 +147,12 @@ export class FolderFilterStore {
   private recompute(): void {
     if (!this.enabled || this.roots.length === 0) {
       this.visible = this.source;
-      return;
+    } else {
+      this.visible = this.source.filter((p) =>
+        this.roots.some((r) => isUnder(p.path, r))
+      );
     }
-    this.visible = this.source.filter((p) =>
-      this.roots.some((r) => isUnder(p.path, r))
-    );
+    this.notify();
   }
 
   async setEnabled(v: boolean): Promise<void> {

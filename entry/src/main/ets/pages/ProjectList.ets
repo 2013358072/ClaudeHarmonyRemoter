@@ -21,6 +21,7 @@ import { formatTimestamp } from '../utils/Format';
 import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { folderFilter } from '../store/FolderFilter';
+import { LazyDataSource } from '../utils/LazyDataSource';
 
 /** 当前打开的弹层。名字不能叫 Sheet —— 会和 ArkUI 的 bindSheet 一族撞车 */
 class SheetKind {
@@ -31,6 +32,37 @@ class SheetKind {
   static readonly GROUP_MENU: string = 'groupMenu';
   /** 齿轮打开的项目设置面板 */
   static readonly PROJECT_MENU: string = 'projectMenu';
+}
+
+/**
+ * 列表里的一行。
+ *
+ * 分区结构（运行中/置顶/分组/未分组）原本是靠多个 ForEach 拼出来的，
+ * 但 ForEach 没有虚拟化 —— 110 个项目卡片会被一次性全部实例化。
+ * 改用 LazyForEach 就必须只有一个数据源，所以先把分区拍平成行序列，
+ * 标题和项目都是行，由 kind 区分。
+ */
+class RowKind {
+  static readonly RUNNING_HEADER: string = 'runHead';
+  static readonly SECTION_HEADER: string = 'secHead';
+  static readonly GROUP_HEADER: string = 'grpHead';
+  static readonly PROJECT: string = 'project';
+  static readonly SPACER: string = 'spacer';
+}
+
+class ListRow {
+  kind: string = '';
+  /** 稳定 key。LazyForEach 要求唯一，否则会错位复用 */
+  key: string = '';
+  title: string = '';
+  count: number = 0;
+  project: ProjectInfo | null = null;
+  group: ProjectGroup | null = null;
+
+  constructor(kind: string, key: string) {
+    this.kind = kind;
+    this.key = key;
+  }
 }
 
 @ComponentV2
@@ -55,6 +87,11 @@ export struct ProjectListView {
   /** 防抖定时器句柄 */
   private searchTimer: number = -1;
 
+  /** 拍平后的行数据源。分区变化时整体重建 */
+  private rows: LazyDataSource<ListRow> = new LazyDataSource<ListRow>();
+  /** 行数单独暴露，供界面判断空态 */
+  @Local rowCount: number = 0;
+
   // ---- 弹层状态 ----
   @Local sheet: string = SheetKind.NONE;
   /** 正在操作的项目 id */
@@ -63,8 +100,20 @@ export struct ProjectListView {
   @Local targetGroupId: string = '';
   @Local inputText: string = '';
 
+  /** 取消订阅筛选变更 */
+  private unsubscribe: () => void = () => {};
+
   aboutToAppear(): void {
+    // 「我的」页改了筛选后，这里要重建行序列。
+    // Tab 之间切换不会重新 aboutToAppear，所以必须靠订阅。
+    this.unsubscribe = folderFilter.onChanged((): void => {
+      this.rebuildRows();
+    });
     this.load();
+  }
+
+  aboutToDisappear(): void {
+    this.unsubscribe();
   }
 
   async load(): Promise<void> {
@@ -73,6 +122,7 @@ export struct ProjectListView {
       this.projects = await apiClient.listProjects();
       // 灌给筛选 store，之后所有分区都基于它过滤后的结果
       folderFilter.setSource(this.projects);
+      this.rebuildRows();
     } catch (e) {
       const err = e as ApiException;
       // token 失效就清掉凭据，下次启动会回到配对页
@@ -117,6 +167,7 @@ export struct ProjectListView {
     this.activeQuery = q;
     if (q.length === 0) {
       this.results = [];
+      this.rebuildRows();
       return;
     }
     // 匹配显示名和真实路径 —— 用户可能记得项目名，
@@ -129,6 +180,7 @@ export struct ProjectListView {
       }
       return p.path.toLowerCase().indexOf(lower) >= 0;
     });
+    this.rebuildRows();
   }
 
   private clearQuery(): void {
@@ -139,6 +191,7 @@ export struct ProjectListView {
     this.query = '';
     this.activeQuery = '';
     this.results = [];
+    this.rebuildRows();
   }
 
   /** 复制工作目录到剪贴板 */
@@ -189,6 +242,88 @@ export struct ProjectListView {
       // 分组被删掉但元信息还指着它时，也算未分组，避免项目凭空消失
       return projectPrefs.groups.find((g) => g.id === gid) === undefined;
     });
+  }
+
+  /**
+   * 重建行序列。
+   *
+   * 任何影响列表构成的操作（加载完成、筛选变化、搜索、置顶、分组折叠）
+   * 之后都要调它 —— 漏掉一处，界面就会停在旧结构上。
+   */
+  private rebuildRows(): void {
+    const out: ListRow[] = [];
+
+    if (this.searching()) {
+      const head = new ListRow(RowKind.SECTION_HEADER, 'h_search');
+      head.title = '搜索结果';
+      head.count = this.results.length;
+      out.push(head);
+      for (const p of this.results) {
+        const r = new ListRow(RowKind.PROJECT, `q_${p.id}`);
+        r.project = p;
+        out.push(r);
+      }
+    } else {
+      const running = this.runningItems();
+      if (running.length > 0) {
+        const head = new ListRow(RowKind.RUNNING_HEADER, 'h_run');
+        head.count = running.length;
+        out.push(head);
+        for (const p of running) {
+          const r = new ListRow(RowKind.PROJECT, `run_${p.id}`);
+          r.project = p;
+          out.push(r);
+        }
+      }
+
+      const pinned = this.pinnedItems();
+      if (pinned.length > 0) {
+        const head = new ListRow(RowKind.SECTION_HEADER, 'h_pin');
+        head.title = '置顶';
+        head.count = pinned.length;
+        out.push(head);
+        for (const p of pinned) {
+          const r = new ListRow(RowKind.PROJECT, `pin_${p.id}`);
+          r.project = p;
+          out.push(r);
+        }
+      }
+
+      for (const g of projectPrefs.groups) {
+        const inGroup = this.itemsInGroup(g.id);
+        const head = new ListRow(RowKind.GROUP_HEADER, `h_g_${g.id}`);
+        head.group = g;
+        head.count = inGroup.length;
+        out.push(head);
+        if (!g.collapsed) {
+          for (const p of inGroup) {
+            const r = new ListRow(RowKind.PROJECT, `${g.id}_${p.id}`);
+            r.project = p;
+            out.push(r);
+          }
+        }
+      }
+
+      const ungrouped = this.ungroupedItems();
+      if (ungrouped.length > 0) {
+        if (projectPrefs.groups.length > 0 || pinned.length > 0 || running.length > 0) {
+          const head = new ListRow(RowKind.SECTION_HEADER, 'h_ung');
+          head.title = '未分组';
+          head.count = ungrouped.length;
+          out.push(head);
+        }
+        for (const p of ungrouped) {
+          const r = new ListRow(RowKind.PROJECT, `ung_${p.id}`);
+          r.project = p;
+          out.push(r);
+        }
+      }
+    }
+
+    out.push(new ListRow(RowKind.SPACER, 'spacer_end'));
+
+    this.rows.setAll(out);
+    this.rowCount = out.length;
   }
 
   private openProject(item: ProjectInfo): void {
@@ -324,6 +459,7 @@ export struct ProjectListView {
     .onClick(() => {
       this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
         projectPrefs.toggleCollapse(group.id);
+        this.rebuildRows();
       });
     })
   }
@@ -417,7 +553,10 @@ export struct ProjectListView {
       this.swipeIcon(
         projectPrefs.isPinned(item.id) ? $r('app.media.ic_pin_off') : $r('app.media.ic_pin'),
         theme.palette.accent,
-        (): void => { projectPrefs.togglePin(item.id); }
+        (): void => {
+          projectPrefs.togglePin(item.id);
+          this.rebuildRows();
+        }
       )
       this.swipeIcon($r('app.media.ic_gear'), theme.palette.textSecondary, (): void => {
         this.targetId = item.id;
@@ -557,6 +696,7 @@ export struct ProjectListView {
     } else {
       projectPrefs.rename(this.targetId, this.inputText);
     }
+    this.rebuildRows();
     this.closeSheet();
   }
 
@@ -644,6 +784,7 @@ export struct ProjectListView {
         Column() {
           this.groupRow('未分组', projectPrefs.groupIdOf(this.targetId) === NO_GROUP, (): void => {
             projectPrefs.assignGroup(this.targetId, NO_GROUP);
+            this.rebuildRows();
             this.closeSheet();
           })
 
@@ -651,6 +792,7 @@ export struct ProjectListView {
             Divider().strokeWidth(0.5).color(theme.palette.border)
             this.groupRow(g.name, projectPrefs.groupIdOf(this.targetId) === g.id, (): void => {
               projectPrefs.assignGroup(this.targetId, g.id);
+              this.rebuildRows();
               this.closeSheet();
             })
           }, (g: ProjectGroup) => g.id)
@@ -705,6 +847,7 @@ export struct ProjectListView {
       .padding({ top: 13, bottom: 13 })
       .onClick(() => {
         projectPrefs.deleteGroup(this.targetGroupId);
+        this.rebuildRows();
         this.closeSheet();
       })
 
@@ -823,84 +966,68 @@ export struct ProjectListView {
   // 两种列表形态
   // -------------------------------------------------------------------------
 
-  @Builder
-  searchResultList() {
-    if (this.results.length === 0) {
-      this.placeholder(`没有匹配「${this.activeQuery}」的项目`, false)
-    } else {
-      List() {
-        ListItem() {
-          this.sectionHeader('搜索结果', this.results.length)
-        }
-        ForEach(this.results, (item: ProjectInfo) => {
-          this.projectItem(item)
-        }, (item: ProjectInfo) => `q_${item.id}`)
+  /**
+   * 取行上的项目。
+   *
+   * LazyForEach 的 item builder 里只能写 UI 语法，声明不了局部常量；
+   * 而 ArkTS 又不把 null 收窄带进嵌套闭包，直接用 row.project 会报
+   * "ProjectInfo | null is not assignable to ProjectInfo"。
+   * 用方法把断言收在一处，调用方已通过 kind 保证非空。
+   */
+  private projectOf(row: ListRow): ProjectInfo {
+    return row.project as ProjectInfo;
+  }
 
-        ListItem() {
-          Row().height(8)
-        }
-      }
-      .layoutWeight(1)
-      .width('100%')
-      .scrollBar(BarState.Off)
+  /** 一行的渲染分发 */
+  @Builder
+  rowView(row: ListRow) {
+    if (row.kind === RowKind.RUNNING_HEADER) {
+      this.runningHeader(row.count)
+    } else if (row.kind === RowKind.GROUP_HEADER && row.group !== null) {
+      this.groupHeader(row.group, row.count)
+    } else if (row.kind === RowKind.SECTION_HEADER) {
+      this.sectionHeader(row.title, row.count)
+    } else {
+      Row().height(8)
     }
   }
 
+  /**
+   * 唯一的列表体。
+   *
+   * 分区已经在 rebuildRows 里拍平成行，这里只需一个 LazyForEach ——
+   * 之前是多个 ForEach 拼接，110 个卡片会被一次性全部实例化。
+   */
   @Builder
-  groupedList() {
+  projectList() {
     List() {
-      // ---- 运行中 ----
-      if (this.runningItems().length > 0) {
-        ListItem() {
-          this.runningHeader(this.runningItems().length)
-        }
-        ForEach(this.runningItems(), (item: ProjectInfo) => {
-          this.projectItem(item)
-        }, (item: ProjectInfo) => `run_${item.id}`)
-      }
-
-      // ---- 置顶 ----
-      if (this.pinnedItems().length > 0) {
-        ListItem() {
-          this.sectionHeader('置顶', this.pinnedItems().length)
-        }
-        ForEach(this.pinnedItems(), (item: ProjectInfo) => {
-          this.projectItem(item)
-        }, (item: ProjectInfo) => `pin_${item.id}`)
-      }
-
-      // ---- 分组抽屉 ----
-      ForEach(projectPrefs.groups, (g: ProjectGroup) => {
-        ListItem() {
-          this.groupHeader(g, this.itemsInGroup(g.id).length)
-        }
-        if (!g.collapsed) {
-          ForEach(this.itemsInGroup(g.id), (item: ProjectInfo) => {
-            this.projectItem(item)
-          }, (item: ProjectInfo) => `${g.id}_${item.id}`)
-        }
-      }, (g: ProjectGroup) => g.id)
-
-      // ---- 未分组 ----
-      if (this.ungroupedItems().length > 0) {
-        if (projectPrefs.groups.length > 0
-          || this.pinnedItems().length > 0
-          || this.runningItems().length > 0) {
+      LazyForEach(this.rows, (row: ListRow) => {
+        // 分两支而不是给 swipeAction 传 undefined ——
+        // 条件属性传 undefined 的行为没有保证，标题行也不该能左滑
+        if (row.kind === RowKind.PROJECT && row.project !== null) {
           ListItem() {
-            this.sectionHeader('未分组', this.ungroupedItems().length)
+            this.projectCard(this.projectOf(row))
+          }
+          .padding({ left: 16, right: 16, bottom: 10 })
+          .swipeAction({
+            end: {
+              builder: () => { this.swipeActions(this.projectOf(row)) },
+              actionAreaDistance: 60
+            },
+            edgeEffect: SwipeEdgeEffect.Spring
+          })
+          .onClick(() => { this.openProject(this.projectOf(row)); })
+        } else {
+          ListItem() {
+            this.rowView(row)
           }
         }
-        ForEach(this.ungroupedItems(), (item: ProjectInfo) => {
-          this.projectItem(item)
-        }, (item: ProjectInfo) => `ung_${item.id}`)
-      }
-
-      ListItem() {
-        Row().height(8)
-      }
+      }, (row: ListRow) => row.key)
     }
     .layoutWeight(1)
     .width('100%')
+    // 上下各多建 8 行，快速滑动时不会出现空白
+    .cachedCount(8)
     .scrollBar(BarState.Off)
   }
 
@@ -962,10 +1089,10 @@ export struct ProjectListView {
               : '服务器上还没有 Claude 会话记录',
             true
           )
-        } else if (this.searching()) {
-          this.searchResultList()
+        } else if (this.searching() && this.results.length === 0) {
+          this.placeholder(`没有匹配「${this.activeQuery}」的项目`, false)
         } else {
-          this.groupedList()
+          this.projectList()
         }
       }
       .width('100%')

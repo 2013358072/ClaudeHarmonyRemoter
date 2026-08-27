@@ -200,7 +200,7 @@ export struct ChatView {
   private queries(): QueryEntry[] {
     const out: QueryEntry[] = [];
     let n = 0;
-    for (const item of appStore.items) {
+    for (const item of appStore.itemsSnapshot()) {
       if (item.kind === EventKind.TEXT && item.role === Role.USER) {
         n++;
         out.push(new QueryEntry(n, item.text.replace(/\s+/g, ' ').trim(), item.id));
@@ -211,7 +211,7 @@ export struct ChatView {
 
   /** 跳到指定消息 */
   private jumpTo(itemId: string): void {
-    const idx = appStore.items.findIndex((x) => x.id === itemId);
+    const idx = appStore.indexOfItem(itemId);
     if (idx < 0) {
       return;
     }
@@ -802,7 +802,7 @@ export struct ChatView {
             .layoutWeight(1)
             .width('100%')
             .justifyContent(FlexAlign.Center)
-          } else if (appStore.items.length === 0 && !appStore.thinking) {
+          } else if (appStore.itemCount === 0 && !appStore.thinking) {
             Column() {
               this.emptyState()
             }
@@ -810,7 +810,9 @@ export struct ChatView {
             .width('100%')
           } else {
             List({ scroller: this.scroller }) {
-              ForEach(appStore.items, (item: ChatItem) => {
+              // LazyForEach 而非 ForEach：后者会把几百条消息一次性全部
+              // 实例化，首屏卡顿。这里只建可见区域附近的。
+              LazyForEach(appStore.itemSource, (item: ChatItem) => {
                 ListItem() {
                   this.itemView(item)
                 }
@@ -834,6 +836,8 @@ export struct ChatView {
             }
             .layoutWeight(1)
             .width('100%')
+            // 上下各多建 6 条，快速滑动时不会出现空白
+            .cachedCount(6)
             // 右侧滑动杆：可拖动定位。长对话里一条条滑太慢
             .scrollBar(BarState.On)
             .scrollBarWidth(4)
