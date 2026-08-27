@@ -23,6 +23,7 @@ export type WireEventKind =
     | 'text'      // 一段文本消息
     | 'thinking'  // 思考过程
     | 'tool'      // 工具调用
+    | 'skill'     // 引用了某个 skill（正文已折叠）
     | 'result'    // 一轮对话结束
     | 'error';    // 出错
 
@@ -49,6 +50,9 @@ export interface WireEvent {
     toolSummary?: string;
     /** kind='tool' 时有效 */
     toolStatus?: WireToolStatus;
+
+    /** kind='skill' 时有效：skill 名称，如 claude-api */
+    skillName?: string;
 
     /** kind='result' 时有效 */
     ok?: boolean;

@@ -33,6 +33,7 @@ export class ChatItem {
   @Trace toolName: string = '';
   @Trace toolSummary: string = '';
   @Trace toolStatus: string = '';
+  @Trace skillName: string = '';
   @Trace ok: boolean = false;
   @Trace durationMs: number = 0;
   @Trace costUsd: number = 0;
@@ -46,6 +47,7 @@ export class ChatItem {
     this.toolName = e.toolName ?? '';
     this.toolSummary = e.toolSummary ?? '';
     this.toolStatus = e.toolStatus ?? '';
+    this.skillName = e.skillName ?? '';
     this.ok = e.ok ?? false;
     this.durationMs = e.durationMs ?? 0;
     this.costUsd = e.costUsd ?? 0;

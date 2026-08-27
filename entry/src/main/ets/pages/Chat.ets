@@ -8,6 +8,9 @@
  * 版式沿用 Claude 的做法：模型回复**不套气泡**，整幅铺开，
  * 只有用户消息用气泡右对齐。长回复套气泡会让阅读变得拥挤，
  * 而对话里真正需要"分清是谁说的"的其实只有用户那一侧。
+ *
+ * 模型回复走 Markdown 渲染（utils/Markdown.ets），用户消息保持纯文本 ——
+ * 用户输入里的 * 和 # 通常就是字面意思，不该被当标记解析。
  */
 
 import { apiClient, ApiException } from '../net/ApiClient';
@@ -22,7 +25,8 @@ import {
   PermissionDecision,
   Decision
 } from '../net/Protocol';
-import { theme, FontSize } from '../theme/Theme';
+import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
+import { parseMarkdown, parseInline, MdBlock, MdSpan, MdType } from '../utils/Markdown';
 
 /** 路由参数 */
 export interface ChatParam {
@@ -33,6 +37,23 @@ export interface ChatParam {
   title: string;
 }
 
+/** 侧栏里的一条提问索引 */
+class QueryEntry {
+  index: number = 0;
+  text: string = '';
+  itemId: string = '';
+
+  constructor(index: number, text: string, itemId: string) {
+    this.index = index;
+    this.text = text;
+    this.itemId = itemId;
+  }
+}
+
+/** 输入框高度范围。超过上限就内部滚动，不再顶高 */
+const COMPOSER_MIN_H: number = 44;
+const COMPOSER_MAX_H: number = 132;
+
 @ComponentV2
 export struct ChatView {
   @Consumer() pathStack: NavPathStack = new NavPathStack();
@@ -40,6 +61,12 @@ export struct ChatView {
 
   @Local draft: string = '';
   @Local loadingHistory: boolean = true;
+  /** 输入框当前高度，随内容行数增长到上限为止 */
+  @Local composerHeight: number = COMPOSER_MIN_H;
+  /** 提问索引侧栏是否展开 */
+  @Local drawerOpen: boolean = false;
+  /** 列表总条数，用于右侧滑动杆定位 */
+  @Local scrollRatio: number = 1;
 
   private scroller: Scroller = new Scroller();
 
@@ -61,8 +88,7 @@ export struct ChatView {
     this.loadingHistory = false;
 
     // 历史铺完直接定位到最新一条 —— 进来就看到最近的对话，
-    // 而不是从几百条之前开始往下翻。
-    // 延时比实时消息那次长：这里要等整个列表首次布局完成。
+    // 而不是从几百条之前开始往下翻
     this.scrollToBottom(220);
 
     this.connect();
@@ -105,8 +131,6 @@ export struct ChatView {
     // fresh=true：这是用户主动进入聊天页，清掉上个会话遗留的重试计数，
     // 否则一进来就显示"正在重连"
     wsClient.connect(true);
-    // connect 是异步的，attach 要等 open 之后；WsClient 内部会在 open 时
-    // 自动补发 attach，所以这里先登记目标会话即可
     wsClient.attach(this.param.projectId, this.param.sessionId);
   }
 
@@ -128,7 +152,34 @@ export struct ChatView {
     }
     wsClient.sendText(text);
     this.draft = '';
+    this.composerHeight = COMPOSER_MIN_H;
     this.scrollToBottom(120);
+  }
+
+  /**
+   * 按内容行数估算输入框高度。
+   *
+   * ArkUI 的 TextArea 不会自动把高度回报给外部，只能按行数估。
+   * 换行符和按宽度折行都算 —— 后者按每行约 22 个全角字符估，
+   * 宽度不精确没关系，超过上限就滚动了。
+   */
+  private recalcComposerHeight(v: string): void {
+    let lines = 1;
+    let col = 0;
+    for (let i = 0; i < v.length; i++) {
+      if (v.charAt(i) === '\n') {
+        lines++;
+        col = 0;
+      } else {
+        col++;
+        if (col >= 22) {
+          lines++;
+          col = 0;
+        }
+      }
+    }
+    const h = COMPOSER_MIN_H + (lines - 1) * 20;
+    this.composerHeight = h > COMPOSER_MAX_H ? COMPOSER_MAX_H : h;
   }
 
   /** 回复权限请求并收起弹窗 */
@@ -145,11 +196,133 @@ export struct ChatView {
     return appStore.wsState === WsState.OPEN;
   }
 
+  /** 提取所有用户提问，供侧栏索引 */
+  private queries(): QueryEntry[] {
+    const out: QueryEntry[] = [];
+    let n = 0;
+    for (const item of appStore.items) {
+      if (item.kind === EventKind.TEXT && item.role === Role.USER) {
+        n++;
+        out.push(new QueryEntry(n, item.text.replace(/\s+/g, ' ').trim(), item.id));
+      }
+    }
+    return out;
+  }
+
+  /** 跳到指定消息 */
+  private jumpTo(itemId: string): void {
+    const idx = appStore.items.findIndex((x) => x.id === itemId);
+    if (idx < 0) {
+      return;
+    }
+    this.drawerOpen = false;
+    setTimeout(() => {
+      this.scroller.scrollToIndex(idx, true);
+    }, 120);
+  }
+
+  // -------------------------------------------------------------------------
+  // Markdown 渲染
+  // -------------------------------------------------------------------------
+
+  /** 一行行内内容。链接暂不可点，只做视觉区分 */
+  @Builder
+  inlineText(src: string, size: number, color: string) {
+    Text() {
+      ForEach(parseInline(src), (sp: MdSpan) => {
+        if (sp.code) {
+          Span(sp.text)
+            .fontFamily('monospace')
+            .fontSize(size - 1)
+            .fontColor(theme.palette.accent)
+        } else if (sp.link.length > 0) {
+          Span(sp.text)
+            .fontColor(theme.palette.accent)
+            .decoration({ type: TextDecorationType.Underline, color: theme.palette.accent })
+        } else {
+          Span(sp.text)
+            .fontWeight(sp.bold ? FontWeight.Bold : FontWeight.Normal)
+            .fontStyle(sp.italic ? FontStyle.Italic : FontStyle.Normal)
+        }
+      }, (sp: MdSpan, i: number) => `${i}_${sp.text.length}`)
+    }
+    .fontSize(size)
+    .fontColor(color)
+    .lineHeight(size * 1.7)
+    .width('100%')
+  }
+
+  @Builder
+  mdBlock(b: MdBlock, size: number) {
+    if (b.type === MdType.HEADING) {
+      // 标题按级别递减，但差距压得比网页小 —— 手机上层级太夸张会割裂阅读
+      this.inlineText(b.text, size + (b.level <= 2 ? 4 : 2), theme.palette.text)
+    } else if (b.type === MdType.CODE) {
+      Column() {
+        if (b.lang.length > 0) {
+          Text(b.lang)
+            .fontSize(size - 2)
+            .fontColor(theme.palette.textTertiary)
+            .width('100%')
+            .padding({ bottom: 4 })
+        }
+        Scroll() {
+          Text(b.text)
+            .fontFamily('monospace')
+            .fontSize(size - 1)
+            .fontColor(theme.palette.text)
+            .lineHeight((size - 1) * 1.55)
+        }
+        .scrollable(ScrollDirection.Horizontal)
+        .scrollBar(BarState.Off)
+        .width('100%')
+        .align(Alignment.TopStart)
+      }
+      .width('100%')
+      .padding(12)
+      .borderRadius(10)
+      .backgroundColor(theme.palette.surfaceAlt)
+    } else if (b.type === MdType.QUOTE) {
+      Row({ space: 10 }) {
+        Row()
+          .width(3)
+          .borderRadius(2)
+          .backgroundColor(theme.palette.accent)
+        Column() {
+          this.inlineText(b.text, size, theme.palette.textSecondary)
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+    } else if (b.type === MdType.LIST_ITEM) {
+      Row({ space: 8 }) {
+        Text(b.ordered ? `${b.index}.` : '•')
+          .fontSize(size)
+          .fontColor(theme.palette.textTertiary)
+          .lineHeight(size * 1.7)
+          .width(b.ordered ? 20 : 12)
+        Column() {
+          this.inlineText(b.text, size, theme.palette.text)
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .alignItems(VerticalAlign.Top)
+    } else if (b.type === MdType.DIVIDER) {
+      Divider()
+        .strokeWidth(0.5)
+        .color(theme.palette.border)
+        .margin({ top: 4, bottom: 4 })
+    } else {
+      this.inlineText(b.text, size, theme.palette.text)
+    }
+  }
+
   // -------------------------------------------------------------------------
   // 渲染
   // -------------------------------------------------------------------------
 
-  /** 顶栏：返回 + 标题 + 连接状态点 */
   @Builder
   header() {
     Row({ space: 10 }) {
@@ -178,22 +351,27 @@ export struct ChatView {
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
 
-      // 连接状态用一个小圆点表达，比文字更安静
+      // 提问索引入口。侧栏靠左滑也能开，这里给一个显式入口
+      Text('☰')
+        .fontSize(theme.fs(16))
+        .fontColor(theme.palette.textSecondary)
+        .padding({ left: 8, right: 8 })
+        .onClick(() => { this.drawerOpen = true; })
+
       Row()
         .width(7)
         .height(7)
         .borderRadius(4)
         .backgroundColor(
-          this.connected() ? '#4CAF7D'
+          this.connected() ? RUNNING_GREEN
             : (appStore.wsState === WsState.CLOSED ? theme.palette.textTertiary : theme.palette.accent)
         )
     }
     .width('100%')
-    .padding({ left: 8, right: 20, top: 10, bottom: 10 })
+    .padding({ left: 8, right: 16, top: 10, bottom: 10 })
     .backgroundColor(theme.palette.bg)
   }
 
-  /** 断线提示条。仅在真的在重连时出现 */
   @Builder
   statusBar() {
     if (appStore.wsState === WsState.RECONNECTING || appStore.wsState === WsState.CONNECTING) {
@@ -226,7 +404,7 @@ export struct ChatView {
     }
   }
 
-  /** 用户消息：右对齐气泡 */
+  /** 用户消息：右对齐气泡，纯文本不做 Markdown 解析 */
   @Builder
   userBubble(item: ChatItem) {
     Row() {
@@ -244,22 +422,51 @@ export struct ChatView {
     .padding({ left: 20, right: 20, top: 8, bottom: 8 })
   }
 
-  /** 模型回复：不套气泡，整幅铺开，字号小一档 */
+  /** 模型回复：不套气泡，Markdown 渲染，字号小一档 */
   @Builder
   assistantText(item: ChatItem) {
-    Text(item.text)
-      .fontSize(theme.fs(FontSize.ASSISTANT))
-      .fontColor(theme.palette.text)
-      .lineHeight(theme.fs(FontSize.ASSISTANT) * 1.7)
-      .width('100%')
-      .padding({ left: 20, right: 20, top: 6, bottom: 10 })
+    Column({ space: 8 }) {
+      ForEach(parseMarkdown(item.text), (b: MdBlock, i: number) => {
+        this.mdBlock(b, theme.fs(FontSize.ASSISTANT))
+      }, (b: MdBlock, i: number) => `${i}_${b.type}`)
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+    .padding({ left: 20, right: 20, top: 6, bottom: 10 })
   }
 
-  /** 思考过程：更弱的存在感，斜体 */
+  /**
+   * skill 引用标记。
+   *
+   * skill 被调用时 Claude Code 会把整份 SKILL.md 注入成一条用户消息
+   * （实测有 9 万字符），服务端已折叠成这个事件，这里只显示个圆角标签。
+   */
+  @Builder
+  skillChip(item: ChatItem) {
+    Row() {
+      Blank()
+      Row({ space: 6 }) {
+        Text('◆')
+          .fontSize(theme.fs(9))
+          .fontColor(theme.palette.accent)
+        Text(item.skillName)
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.accent)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .padding({ left: 10, right: 10, top: 5, bottom: 5 })
+      .borderRadius(10)
+      .backgroundColor(theme.palette.surfaceAlt)
+      .border({ width: 1, color: theme.palette.border })
+    }
+    .width('100%')
+    .padding({ left: 20, right: 20, top: 2, bottom: 6 })
+  }
+
   @Builder
   thinkingBlock(item: ChatItem) {
     Row({ space: 8 }) {
-      // 左侧竖线，暗示这是"旁白"而非正文
       Row()
         .width(2)
         .borderRadius(1)
@@ -276,15 +483,11 @@ export struct ChatView {
     .padding({ left: 20, right: 20, top: 4, bottom: 6 })
   }
 
-  /** 工具调用：紧凑单行，状态用图标区分 */
   @Builder
   toolRow(item: ChatItem) {
     Row({ space: 8 }) {
       if (item.toolStatus === ToolStatus.RUNNING) {
-        LoadingProgress()
-          .width(12)
-          .height(12)
-          .color(theme.palette.accent)
+        LoadingProgress().width(12).height(12).color(theme.palette.accent)
       } else if (item.toolStatus === ToolStatus.ERROR) {
         Text('✕')
           .fontSize(theme.fs(FontSize.TINY))
@@ -330,6 +533,8 @@ export struct ChatView {
       } else {
         this.assistantText(item)
       }
+    } else if (item.kind === EventKind.SKILL) {
+      this.skillChip(item)
     } else if (item.kind === EventKind.THINKING) {
       this.thinkingBlock(item)
     } else if (item.kind === EventKind.TOOL) {
@@ -339,7 +544,6 @@ export struct ChatView {
     }
   }
 
-  /** 空会话的引导 */
   @Builder
   emptyState() {
     Column({ space: 10 }) {
@@ -358,19 +562,89 @@ export struct ChatView {
     .padding(40)
   }
 
-  /** 权限确认弹层 */
+  /** 提问索引侧栏 */
+  @Builder
+  queryDrawer() {
+    Row() {
+      Column() {
+        Row() {
+          Text('提问索引')
+            .fontSize(theme.fs(FontSize.HEADING))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(theme.palette.text)
+          Blank()
+          Text(`${this.queries().length}`)
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.textTertiary)
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 18, bottom: 12 })
+
+        Divider().strokeWidth(0.5).color(theme.palette.border)
+
+        if (this.queries().length === 0) {
+          Column() {
+            Text('还没有提问')
+              .fontSize(theme.fs(FontSize.LABEL))
+              .fontColor(theme.palette.textTertiary)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .justifyContent(FlexAlign.Center)
+        } else {
+          List() {
+            ForEach(this.queries(), (q: QueryEntry) => {
+              ListItem() {
+                Row({ space: 10 }) {
+                  Text(`${q.index}`)
+                    .fontSize(theme.fs(FontSize.TINY))
+                    .fontColor(theme.palette.textTertiary)
+                    .width(20)
+                    .textAlign(TextAlign.End)
+                  Text(q.text)
+                    .fontSize(theme.fs(FontSize.LABEL))
+                    .fontColor(theme.palette.text)
+                    .maxLines(2)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .layoutWeight(1)
+                }
+                .width('100%')
+                .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+                .alignItems(VerticalAlign.Top)
+              }
+              .onClick(() => this.jumpTo(q.itemId))
+            }, (q: QueryEntry) => q.itemId)
+          }
+          .layoutWeight(1)
+          .width('100%')
+          .scrollBar(BarState.Off)
+          .divider({ strokeWidth: 0.5, color: theme.palette.border })
+        }
+      }
+      .width('78%')
+      .height('100%')
+      .backgroundColor(theme.palette.surface)
+
+      // 右侧留白区点击关闭
+      Column()
+        .layoutWeight(1)
+        .height('100%')
+        .backgroundColor('#59000000')
+        .onClick(() => { this.drawerOpen = false; })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
   @Builder
   permissionSheet(req: PermissionRequest) {
     Column() {
-      // 遮罩点击不关闭 —— 权限必须明确表态，
-      // 误触关掉会让 Claude 那边一直等着
       Column()
         .layoutWeight(1)
         .width('100%')
         .backgroundColor('#59000000')
 
       Column({ space: 14 }) {
-        // 顶部小横条，暗示这是一个可交互的弹层
         Row()
           .width(36)
           .height(4)
@@ -394,8 +668,6 @@ export struct ChatView {
         .width('100%')
 
         if (req.detail.length > 0) {
-          // 参数详情可能很长（比如整条 bash 命令），给独立滚动区，
-          // 避免把按钮挤出屏幕
           Scroll() {
             Text(req.detail)
               .fontSize(theme.fs(FontSize.TINY))
@@ -454,48 +726,64 @@ export struct ChatView {
     .height('100%')
   }
 
-  /** 输入区 */
+  /**
+   * 输入区。
+   *
+   * 用 TextArea 而不是 TextInput：回车换行而非发送。
+   * 手机上写多行指令是常态，回车即发会让人不敢换行。
+   * 高度随内容增长到上限后内部滚动，参照 GPT 的做法。
+   */
   @Builder
   composer() {
-    Row({ space: 10 }) {
-      TextInput({ placeholder: '发送指令…', text: this.draft })
+    Row({ space: 8 }) {
+      TextArea({ placeholder: '发送指令…', text: this.draft })
         .layoutWeight(1)
-        .height(44)
+        .height(this.composerHeight)
+        .constraintSize({ minHeight: COMPOSER_MIN_H, maxHeight: COMPOSER_MAX_H })
         .fontSize(theme.fs(FontSize.BODY))
         .fontColor(theme.palette.text)
         .placeholderColor(theme.palette.textTertiary)
         .backgroundColor(theme.palette.surfaceAlt)
-        .borderRadius(22)
-        .padding({ left: 16, right: 16 })
-        .onChange((v: string) => { this.draft = v; })
-        .onSubmit(() => this.submit())
+        .borderRadius(20)
+        .padding({ left: 14, right: 14, top: 11, bottom: 11 })
+        .onChange((v: string) => {
+          this.draft = v;
+          this.recalcComposerHeight(v);
+        })
 
-      if (appStore.thinking) {
-        // 思考中把发送换成停止 —— 同一个位置，减少误触
-        Button('■')
-          .width(44)
-          .height(44)
-          .fontSize(theme.fs(FontSize.LABEL))
-          .fontColor(theme.palette.onAccent)
-          .backgroundColor(theme.palette.danger)
-          .borderRadius(22)
-          .onClick(() => wsClient.interrupt())
-      } else {
-        Button('↑')
-          .width(44)
-          .height(44)
-          .fontSize(theme.fs(20))
-          .fontColor(theme.palette.onAccent)
-          .backgroundColor(
-            this.draft.trim().length > 0 ? theme.palette.accent : theme.palette.border
-          )
-          .borderRadius(22)
-          .enabled(this.draft.trim().length > 0)
-          .onClick(() => this.submit())
+      // 按钮固定 44 见方，和输入框底部对齐。
+      // 之前它被压在 Row 末尾又没留右边距，窄屏上会被切掉一角。
+      Column() {
+        Blank()
+        if (appStore.thinking) {
+          Button('■')
+            .width(44)
+            .height(44)
+            .fontSize(theme.fs(FontSize.LABEL))
+            .fontColor(theme.palette.onAccent)
+            .backgroundColor(theme.palette.danger)
+            .borderRadius(22)
+            .onClick(() => wsClient.interrupt())
+        } else {
+          Button('↑')
+            .width(44)
+            .height(44)
+            .fontSize(theme.fs(20))
+            .fontColor(theme.palette.onAccent)
+            .backgroundColor(
+              this.draft.trim().length > 0 ? theme.palette.accent : theme.palette.border
+            )
+            .borderRadius(22)
+            .enabled(this.draft.trim().length > 0)
+            .onClick(() => this.submit())
+        }
       }
+      .width(44)
+      .height(this.composerHeight)
     }
     .width('100%')
     .padding({ left: 16, right: 16, top: 10, bottom: 14 })
+    .alignItems(VerticalAlign.Bottom)
     .backgroundColor(theme.palette.bg)
   }
 
@@ -540,14 +828,16 @@ export struct ChatView {
                 }
               }
 
-              // 底部留白，最后一条消息不至于贴着输入框
               ListItem() {
                 Row().height(12)
               }
             }
             .layoutWeight(1)
             .width('100%')
-            .scrollBar(BarState.Off)
+            // 右侧滑动杆：可拖动定位。长对话里一条条滑太慢
+            .scrollBar(BarState.On)
+            .scrollBarWidth(4)
+            .scrollBarColor(theme.palette.border)
             .listDirection(Axis.Vertical)
           }
 
@@ -557,14 +847,28 @@ export struct ChatView {
         .height('100%')
         .backgroundColor(theme.palette.bg)
 
-        // 权限确认覆盖在聊天界面之上
         if (appStore.pendingPermission !== null) {
           this.permissionSheet(appStore.pendingPermission)
+        }
+
+        if (this.drawerOpen) {
+          this.queryDrawer()
         }
       }
       .width('100%')
       .height('100%')
       .alignContent(Alignment.Bottom)
+      // 从左边缘右滑打开提问索引
+      .gesture(
+        PanGesture({ direction: PanDirection.Horizontal, distance: 24 })
+          .onActionEnd((e: GestureEvent) => {
+            if (e.offsetX > 60 && !this.drawerOpen) {
+              this.drawerOpen = true;
+            } else if (e.offsetX < -60 && this.drawerOpen) {
+              this.drawerOpen = false;
+            }
+          })
+      )
     }
     .hideTitleBar(true)
     .backgroundColor(theme.palette.bg)

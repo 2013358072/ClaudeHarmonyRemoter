@@ -9,7 +9,7 @@
 // 事件（服务端 → 客户端）
 // ============================================================================
 
-/** 'text' | 'thinking' | 'tool' | 'result' | 'error' */
+/** 'text' | 'thinking' | 'tool' | 'skill' | 'result' | 'error' */
 export type WireEventKind = string;
 
 /** 'user' | 'assistant' */
@@ -29,6 +29,9 @@ export interface WireEvent {
   toolName?: string;
   toolSummary?: string;
   toolStatus?: WireToolStatus;
+
+  /** kind='skill' 时有效：被引用的 skill 名 */
+  skillName?: string;
 
   ok?: boolean;
   durationMs?: number;
@@ -142,6 +145,7 @@ export class EventKind {
   static readonly TEXT: string = 'text';
   static readonly THINKING: string = 'thinking';
   static readonly TOOL: string = 'tool';
+  static readonly SKILL: string = 'skill';
   static readonly RESULT: string = 'result';
   static readonly ERROR: string = 'error';
 }

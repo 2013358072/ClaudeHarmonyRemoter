@@ -102,6 +102,72 @@ export function summarizeTool(name: string, input: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Skill 注入的识别
+// ---------------------------------------------------------------------------
+
+/**
+ * skill 被调用时，Claude Code 会把整份 SKILL.md 当作一条用户消息注入。
+ * 实测最长的一条有 91114 个字符 —— 原样显示会在手机上糊出一整屏墙。
+ *
+ * 它的首行形如：
+ *   Base directory for this skill: C:\...\bundled-skills\<hash>\claude-api
+ * 路径最后一段就是 skill 名。
+ */
+const SKILL_MARKER = 'Base directory for this skill:';
+
+/** 认出 skill 注入就返回它的名字，否则返回 undefined */
+function detectSkill(text: string): string | undefined {
+    if (!text.startsWith(SKILL_MARKER)) return undefined;
+    const firstLine = text.slice(0, text.indexOf('\n') >= 0 ? text.indexOf('\n') : text.length);
+    const dir = firstLine.slice(SKILL_MARKER.length).trim();
+    if (!dir) return undefined;
+    // 兼容两种分隔符：服务端可能是 Linux，skill 路径却来自 Windows 客户端
+    const parts = dir.split(/[\\/]/).filter((p) => p.length > 0);
+    return parts.length > 0 ? parts[parts.length - 1] : undefined;
+}
+
+/**
+ * 其他不该出现在对话里的注入内容。
+ *
+ * system-reminder 是 Claude Code 给模型的旁白，用户从没输入过它；
+ * command-name/command-message 是斜杠命令的内部结构。
+ * 这些混在消息流里只会干扰阅读。
+ */
+function isInjectedNoise(text: string): boolean {
+    const t = text.trimStart();
+    return (
+        t.startsWith('<system-reminder>')
+        || t.startsWith('<command-name>')
+        || t.startsWith('<command-message>')
+        || t.startsWith('<local-command-stdout>')
+    );
+}
+
+/**
+ * 把一段文本变成事件：先过滤注入噪声，再识别 skill，最后才当普通文本。
+ * 返回 null 表示这段内容不该出现在对话流里。
+ */
+function makeUserTextEvent(
+    text: string,
+    role: 'user' | 'assistant',
+    id: string,
+    ts: number,
+): WireEvent | null {
+    if (text.trim().length === 0) return null;
+
+    // 只有用户侧的消息会被注入，模型输出原样保留
+    if (role === 'user') {
+        const skill = detectSkill(text);
+        if (skill) {
+            return { kind: 'skill', id, ts, skillName: skill };
+        }
+        if (isInjectedNoise(text)) return null;
+    }
+
+    return { kind: 'text', id, ts, role, text };
+}
+
+// ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
 
@@ -142,15 +208,8 @@ export function normalize(message: unknown): NormalizeResult {
             // content 可能是纯字符串（用户消息常见）
             const asText = str(content);
             if (asText !== undefined) {
-                if (asText.trim().length > 0) {
-                    events.push({
-                        kind: 'text',
-                        id: eventId(str(message['uuid'])),
-                        ts,
-                        role,
-                        text: asText,
-                    });
-                }
+                const e = makeUserTextEvent(asText, role, eventId(str(message['uuid'])), ts);
+                if (e) events.push(e);
                 return { events, sessionId };
             }
 
@@ -164,14 +223,9 @@ export function normalize(message: unknown): NormalizeResult {
 
                 if (blockType === 'text') {
                     const text = str(block['text']);
-                    if (text && text.trim().length > 0) {
-                        events.push({
-                            kind: 'text',
-                            id: eventId(uuid, `t${i}`),
-                            ts,
-                            role,
-                            text,
-                        });
+                    if (text) {
+                        const e = makeUserTextEvent(text, role, eventId(uuid, `t${i}`), ts);
+                        if (e) events.push(e);
                     }
                 } else if (blockType === 'thinking') {
                     const text = str(block['thinking']);
