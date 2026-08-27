@@ -15,11 +15,17 @@ import {
 } from '../theme/Theme';
 import { appStore } from '../store/AppStore';
 import { apiClient } from '../net/ApiClient';
+import { folderFilter, FolderCandidate } from '../store/FolderFilter';
 
 @ComponentV2
 export struct ProfileView {
   /** 退出登录回调，由宿主切回配对页 */
   @Event onSignOut: () => void = () => {};
+
+  /** 是否展开「添加文件夹」面板 */
+  @Local pickerOpen: boolean = false;
+  /** 手动输入的路径 */
+  @Local manualPath: string = '';
 
   @Builder
   sectionTitle(text: string) {
@@ -135,8 +141,245 @@ export struct ProfileView {
     .padding({ top: 13, bottom: 13, left: 16, right: 16 })
   }
 
-  build() {
+  /** 已加入筛选的目录行 */
+  @Builder
+  rootRow(path: string) {
+    Row({ space: 10 }) {
+      Text('📁')
+        .fontSize(theme.fs(FontSize.LABEL))
+      Column({ space: 2 }) {
+        Text(path)
+          .fontSize(theme.fs(FontSize.LABEL))
+          .fontColor(theme.palette.text)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(`${folderFilter.countUnder(path)} 个项目`)
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.textTertiary)
+          .width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Text('✕')
+        .fontSize(theme.fs(FontSize.LABEL))
+        .fontColor(theme.palette.textTertiary)
+        .padding({ left: 8, right: 2 })
+        .onClick(() => { folderFilter.removeRoot(path); })
+    }
+    .width('100%')
+    .padding({ left: 16, right: 16, top: 12, bottom: 12 })
+  }
+
+  /** 候选目录行 */
+  @Builder
+  candidateRow(c: FolderCandidate) {
+    Row({ space: 10 }) {
+      Column({ space: 2 }) {
+        Text(c.path)
+          .fontSize(theme.fs(FontSize.LABEL))
+          .fontColor(folderFilter.hasRoot(c.path) ? theme.palette.textTertiary : theme.palette.text)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+        Text(`${c.count} 个项目`)
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.textTertiary)
+          .width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      if (folderFilter.hasRoot(c.path)) {
+        Text('已添加')
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.textTertiary)
+      } else {
+        Text('＋')
+          .fontSize(theme.fs(18))
+          .fontColor(theme.palette.accent)
+      }
+    }
+    .width('100%')
+    .padding({ top: 12, bottom: 12 })
+    .onClick(() => {
+      if (!folderFilter.hasRoot(c.path)) {
+        folderFilter.addRoot(c.path);
+      }
+    })
+  }
+
+  /** 文件夹筛选区 */
+  @Builder
+  filterSection() {
     Column() {
+      this.sectionTitle('文件夹筛选')
+
+      Column() {
+        Row() {
+          Column({ space: 2 }) {
+            Text('只显示指定文件夹')
+              .fontSize(theme.fs(FontSize.BODY))
+              .fontColor(theme.palette.text)
+            Text(
+              folderFilter.enabled && folderFilter.roots.length > 0
+                ? `已隐藏 ${folderFilter.hiddenCount()} / ${folderFilter.totalCount()} 个项目`
+                : `当前显示全部 ${folderFilter.totalCount()} 个项目`
+            )
+              .fontSize(theme.fs(FontSize.TINY))
+              .fontColor(theme.palette.textTertiary)
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+
+          Toggle({ type: ToggleType.Switch, isOn: folderFilter.enabled })
+            .selectedColor(theme.palette.accent)
+            .onChange((v: boolean) => { folderFilter.setEnabled(v); })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 13, bottom: 13 })
+
+        if (folderFilter.roots.length > 0) {
+          Divider().strokeWidth(0.5).color(theme.palette.border).margin({ left: 16 })
+          ForEach(folderFilter.roots, (r: string) => {
+            this.rootRow(r)
+          }, (r: string) => r)
+        }
+
+        Divider().strokeWidth(0.5).color(theme.palette.border).margin({ left: 16 })
+
+        Row() {
+          Text('＋ 添加文件夹')
+            .fontSize(theme.fs(FontSize.BODY))
+            .fontColor(theme.palette.accent)
+          Blank()
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, top: 13, bottom: 13 })
+        .onClick(() => {
+          this.manualPath = '';
+          this.pickerOpen = true;
+        })
+      }
+      .width('100%')
+      .borderRadius(14)
+      .backgroundColor(theme.palette.surface)
+      .border({ width: 1, color: theme.palette.border })
+
+      if (folderFilter.roots.length === 0) {
+        Text('未添加时显示全部项目。添加后只显示这些目录下的会话。')
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.textTertiary)
+          .width('100%')
+          .padding({ left: 4, top: 8 })
+      }
+    }
+    .width('100%')
+  }
+
+  /**
+   * 添加文件夹的弹层。
+   *
+   * 主入口是从现有项目路径推导的候选列表 —— 手机上手打绝对路径太痛苦，
+   * 而候选其实是现成的。手动输入作为兜底，用于还没有会话记录的目录。
+   */
+  @Builder
+  pickerSheet() {
+    Column() {
+      Column()
+        .layoutWeight(1)
+        .width('100%')
+        .backgroundColor('#59000000')
+        .onClick(() => { this.pickerOpen = false; })
+
+      Column({ space: 14 }) {
+        Row()
+          .width(36)
+          .height(4)
+          .borderRadius(2)
+          .backgroundColor(theme.palette.border)
+
+        Text('添加文件夹')
+          .fontSize(theme.fs(FontSize.HEADING))
+          .fontWeight(FontWeight.Medium)
+          .fontColor(theme.palette.text)
+          .width('100%')
+
+        if (folderFilter.candidates().length > 0) {
+          Text('从已有项目中选择')
+            .fontSize(theme.fs(FontSize.TINY))
+            .fontColor(theme.palette.textSecondary)
+            .width('100%')
+
+          Scroll() {
+            Column() {
+              ForEach(folderFilter.candidates(), (c: FolderCandidate) => {
+                this.candidateRow(c)
+                Divider().strokeWidth(0.5).color(theme.palette.border)
+              }, (c: FolderCandidate) => c.path)
+            }
+            .width('100%')
+          }
+          .constraintSize({ maxHeight: 240 })
+          .width('100%')
+          .scrollBar(BarState.Off)
+        }
+
+        Text('或手动输入路径')
+          .fontSize(theme.fs(FontSize.TINY))
+          .fontColor(theme.palette.textSecondary)
+          .width('100%')
+
+        Row({ space: 10 }) {
+          TextInput({ placeholder: '/home/me/work', text: this.manualPath })
+            .layoutWeight(1)
+            .height(44)
+            .fontSize(theme.fs(FontSize.LABEL))
+            .fontColor(theme.palette.text)
+            .placeholderColor(theme.palette.textTertiary)
+            .backgroundColor(theme.palette.surfaceAlt)
+            .borderRadius(12)
+            .onChange((v: string) => { this.manualPath = v; })
+
+          Button('添加')
+            .height(44)
+            .fontSize(theme.fs(FontSize.LABEL))
+            .fontColor(theme.palette.onAccent)
+            .backgroundColor(theme.palette.accent)
+            .borderRadius(12)
+            .padding({ left: 18, right: 18 })
+            .enabled(this.manualPath.trim().length > 0)
+            .onClick(() => {
+              folderFilter.addRoot(this.manualPath);
+              this.manualPath = '';
+              this.pickerOpen = false;
+            })
+        }
+        .width('100%')
+
+        Button('完成')
+          .width('100%')
+          .height(46)
+          .fontSize(theme.fs(FontSize.BODY))
+          .fontColor(theme.palette.text)
+          .backgroundColor(theme.palette.surfaceAlt)
+          .borderRadius(12)
+          .onClick(() => { this.pickerOpen = false; })
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 12, bottom: 26 })
+      .backgroundColor(theme.palette.surface)
+      .borderRadius({ topLeft: 20, topRight: 20 })
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  build() {
+    // Stack 是为了让「添加文件夹」弹层能盖在整页之上
+    Stack() {
+      Column() {
       // ---- 标题 ----
       Row() {
         Text('我的')
@@ -204,6 +447,9 @@ export struct ProfileView {
           }
           .width('100%')
 
+          // ---- 文件夹筛选 ----
+          this.filterSection()
+
           // ---- 连接 ----
           Column() {
             this.sectionTitle('连接')
@@ -244,9 +490,17 @@ export struct ProfileView {
       .width('100%')
       .scrollBar(BarState.Off)
       .align(Alignment.Top)
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(theme.palette.bg)
+
+      if (this.pickerOpen) {
+        this.pickerSheet()
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(theme.palette.bg)
+    .alignContent(Alignment.Bottom)
   }
 }

@@ -20,6 +20,7 @@ import { appStore } from '../store/AppStore';
 import { apiClient } from '../net/ApiClient';
 import { theme, FontSize } from '../theme/Theme';
 import { projectPrefs } from '../store/ProjectPrefs';
+import { folderFilter } from '../store/FolderFilter';
 import { PairingView } from './Pairing';
 import { ProjectListView } from './ProjectList';
 import { ProfileView } from './Profile';
@@ -43,6 +44,7 @@ struct Index {
     // 主题要先于界面就位，否则会先闪一下默认配色
     await theme.init(ctx);
     await projectPrefs.init(ctx);
+    await folderFilter.init(ctx);
     await tokenStore.init(ctx);
 
     const creds: Credentials | null = await tokenStore.load();

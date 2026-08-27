@@ -20,6 +20,7 @@ import { SessionListParam } from './SessionList';
 import { formatTimestamp } from '../utils/Format';
 import { theme, FontSize, RUNNING_GREEN } from '../theme/Theme';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { folderFilter } from '../store/FolderFilter';
 
 /** 当前打开的弹层。名字不能叫 Sheet —— 会和 ArkUI 的 bindSheet 一族撞车 */
 class SheetKind {
@@ -70,6 +71,8 @@ export struct ProjectListView {
     this.errorText = '';
     try {
       this.projects = await apiClient.listProjects();
+      // 灌给筛选 store，之后所有分区都基于它过滤后的结果
+      folderFilter.setSource(this.projects);
     } catch (e) {
       const err = e as ApiException;
       // token 失效就清掉凭据，下次启动会回到配对页
@@ -119,7 +122,7 @@ export struct ProjectListView {
     // 匹配显示名和真实路径 —— 用户可能记得项目名，
     // 也可能记得的是路径里的某一段
     const lower = q.toLowerCase();
-    this.results = this.projects.filter((p) => {
+    this.results = this.shown().filter((p) => {
       const name = projectPrefs.displayName(p.id, p.name).toLowerCase();
       if (name.indexOf(lower) >= 0) {
         return true;
@@ -148,17 +151,26 @@ export struct ProjectListView {
     });
   }
 
+  /**
+   * 参与展示的项目 —— 已经过文件夹筛选。
+   * 各分区一律基于它，不要直接用 this.projects，
+   * 否则筛选对那个分区就失效了。
+   */
+  private shown(): ProjectInfo[] {
+    return folderFilter.visible;
+  }
+
   private runningItems(): ProjectInfo[] {
-    return this.projects.filter((p) => p.running);
+    return this.shown().filter((p) => p.running);
   }
 
   /** 置顶区排除运行中的 —— 后者已单独成区，不重复出现 */
   private pinnedItems(): ProjectInfo[] {
-    return this.projects.filter((p) => !p.running && projectPrefs.isPinned(p.id));
+    return this.shown().filter((p) => !p.running && projectPrefs.isPinned(p.id));
   }
 
   private itemsInGroup(groupId: string): ProjectInfo[] {
-    return this.projects.filter((p) =>
+    return this.shown().filter((p) =>
       !p.running
         && !projectPrefs.isPinned(p.id)
         && projectPrefs.groupIdOf(p.id) === groupId
@@ -166,7 +178,7 @@ export struct ProjectListView {
   }
 
   private ungroupedItems(): ProjectInfo[] {
-    return this.projects.filter((p) => {
+    return this.shown().filter((p) => {
       if (p.running || projectPrefs.isPinned(p.id)) {
         return false;
       }
@@ -782,12 +794,12 @@ export struct ProjectListView {
 
   /** 当前操作目标的显示名 */
   private targetName(): string {
-    const p = this.projects.find((x) => x.id === this.targetId);
+    const p = this.shown().find((x) => x.id === this.targetId);
     return p === undefined ? '' : projectPrefs.displayName(p.id, p.name);
   }
 
   private targetPath(): string {
-    const p = this.projects.find((x) => x.id === this.targetId);
+    const p = this.shown().find((x) => x.id === this.targetId);
     return p === undefined ? '' : p.path;
   }
 
@@ -925,7 +937,7 @@ export struct ProjectListView {
         .alignItems(VerticalAlign.Center)
 
         // ---- 搜索 ----
-        if (!this.loading && this.errorText.length === 0 && this.projects.length > 0) {
+        if (!this.loading && this.errorText.length === 0 && this.shown().length > 0) {
           Column() {
             this.searchBar()
           }
@@ -942,8 +954,14 @@ export struct ProjectListView {
           .justifyContent(FlexAlign.Center)
         } else if (this.errorText.length > 0) {
           this.placeholder(this.errorText, true)
-        } else if (this.projects.length === 0) {
-          this.placeholder('服务器上还没有 Claude 会话记录', true)
+        } else if (this.shown().length === 0) {
+          // 区分"服务器上没有"和"被筛选挡住了"，否则用户会以为数据丢了
+          this.placeholder(
+            folderFilter.enabled && folderFilter.totalCount() > 0
+              ? `文件夹筛选已开启，${folderFilter.totalCount()} 个项目被隐藏。可在「我的」里调整`
+              : '服务器上还没有 Claude 会话记录',
+            true
+          )
         } else if (this.searching()) {
           this.searchResultList()
         } else {
